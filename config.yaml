@@ -1,0 +1,40 @@
+opcua:
+  endpoint: "opc.tcp://127.0.0.1:49320"
+  security_policy: None
+  identity: anonymous
+  session_retry_limit: -1
+  application_uri: "urn:KepwareBridge"
+
+mysql:
+  url: "mysql://user:pass@127.0.0.1:3306/iot"
+  max_connections: 8
+
+subscriptions:
+  - name: "fast"
+    publishing_interval_ms: 500
+    keep_alive_count: 10
+    lifetime_count: 30
+    max_notifications_per_publish: 0
+    priority: 0
+    tags:
+      - { node_id: "ns=2;s=Channel1.Device1.Temperature", alias: "temp_1" }
+  - name: "slow"
+    publishing_interval_ms: 5000
+    keep_alive_count: 10
+    lifetime_count: 30
+    max_notifications_per_publish: 0
+    priority: 0
+    tags:
+      - { node_id: "ns=2;s=Channel1.Device1.Pressure", alias: "press_1" }
+
+sink:
+  table: "tag_log"
+  batch_size: 500
+  flush_interval_ms: 1000
+
+buffer:
+  path: "./data/wal"
+  max_size_mb: 1024
+
+metrics:
+  bind: "127.0.0.1:9090"
