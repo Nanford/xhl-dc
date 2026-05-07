@@ -29,30 +29,29 @@ Rust 编写的工业数据采集服务，从 Kepware（KEPServerEX）通过 OPC 
 数据流是严格单向的，任何修改都不能破坏这个方向：
 
 ```
-Kepware OPC UA Server
-        │  Subscription + MonitoredItem
-        ▼
-   DataChangeCallback (同步闭包)
-        │  try_send
-        ▼
-   tokio::mpsc Channel
-        │  select(消息 / 定时器)
-        ▼
-   Sink Worker (批量攒批)
-        │  INSERT 失败时
-        ▼
-   sled 本地缓冲 ──回灌──► MySQL
+Kepware OPC UA Server ──subscription──► DataChangeCallback ──try_send──┐
+                                                                       ├──► tokio::mpsc Channel
+WCS HTTP API ──────────poll loop──► extract + try_send ────────────────┘         │
+                                                                          select(消息 / 定时器)
+                                                                                 ▼
+                                                                          Sink Worker (批量攒批)
+                                                                                 │  INSERT 失败时
+                                                                                 ▼
+                                                                          sled 本地缓冲 ──回灌──► MySQL
 ```
 
-回调闭包里只做一件事：把数据塞进 mpsc 通道。绝不在回调里写库、做 IO、做复杂计算、做 await。async-opcua 的 DataChangeCallback 签名是同步闭包，强行 async 会编译失败，也会反压到协议层。
+所有采集器共用同一个 mpsc 通道，各自独立连接/重连/重试，互不影响。新增协议只需实现采集模块并 spawn 到 JoinSet。
+
+OPC UA 回调闭包里只做一件事：把数据塞进 mpsc 通道。绝不在回调里写库、做 IO、做复杂计算、做 await。async-opcua 的 DataChangeCallback 签名是同步闭包，强行 async 会编译失败，也会反压到协议层。
 
 ## 模块划分
 
 ```
 src/
-├── main.rs           启动入口、信号处理、关闭流程
-├── config.rs         配置加载与校验
-├── opcua_client.rs   Session 管理、订阅创建、自动重连
+├── main.rs           启动入口、JoinSet 管理多采集器、信号处理、关闭流程
+├── config.rs         配置加载与校验（opcua/wcs 均为 Optional）
+├── opcua_client.rs   OPC UA Session 管理、订阅创建、自动重连
+├── wcs_client.rs     WCS HTTP API 轮询、JSON 提取、重试
 ├── sink.rs           批量入库 worker
 ├── buffer.rs         sled 失败缓冲与回灌
 ├── metrics.rs        Prometheus 指标暴露
@@ -200,6 +199,18 @@ curl http://localhost:9090/metrics
 不要把 println!/dbg! 留在生产代码，全部用 tracing。提交前 grep 一遍确认。
 
 新增配置项必须同步更新 config.yaml 示例与 README，配置项命名走 snake_case，单位写在字段名里（_ms / _mb / _count）。
+
+## 新增采集协议的模式
+
+后续加 Modbus/MQTT/其他协议只需 5 步：
+
+1. `config.rs` 加 `Option<XxxConfig>` + 校验，更新 "至少一个 collector" 检查
+2. 新建 `src/xxx_client.rs`，实现 `pub async fn run_xxx_client(config: XxxConfig, sender: mpsc::Sender<TagSample>, shutdown: watch::Receiver<bool>) -> anyhow::Result<()>`
+3. `lib.rs` 注册模块
+4. `main.rs` 加一个 `if let Some(xxx) = config.xxx { collectors.spawn(...) }` 块
+5. `metrics.rs` 加协议专属指标（connected gauge + error counter）
+
+不要引入 Collector trait 或 registry 模式，每个协议一个独立模块即可。
 
 ## 禁止事项
 

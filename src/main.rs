@@ -8,7 +8,9 @@ use kepware_bridge::config::AppConfig;
 use kepware_bridge::metrics::install_prometheus;
 use kepware_bridge::opcua_client::run_opcua_client;
 use kepware_bridge::sink::{connect_mysql, SinkWorker};
+use kepware_bridge::wcs_client::run_wcs_client;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -42,35 +44,55 @@ async fn main() -> anyhow::Result<()> {
     );
     let sink_handle = tokio::spawn(sink_worker.run());
 
-    let opcua_handle = tokio::spawn(run_opcua_client(config, sample_tx, shutdown_rx));
+    let mut collectors = JoinSet::new();
+
+    if let Some(opcua_config) = config.opcua {
+        let subscriptions = config.subscriptions;
+        let tx = sample_tx.clone();
+        let rx = shutdown_rx.clone();
+        collectors.spawn(async move {
+            run_opcua_client(opcua_config, subscriptions, tx, rx)
+                .await
+                .context("OPC UA collector failed")
+        });
+        info!("OPC UA collector spawned");
+    }
+
+    if let Some(wcs_config) = config.wcs {
+        let tx = sample_tx.clone();
+        let rx = shutdown_rx.clone();
+        collectors.spawn(async move {
+            run_wcs_client(wcs_config, tx, rx)
+                .await
+                .context("WCS collector failed")
+        });
+        info!("WCS collector spawned");
+    }
+
+    drop(sample_tx);
 
     shutdown_signal().await?;
     info!("shutdown signal received");
     let _ = shutdown_tx.send(true);
 
     let shutdown_result = tokio::time::timeout(Duration::from_secs(30), async {
-        let opcua_result = opcua_handle.await;
-        let sink_result = sink_handle.await;
-        (opcua_result, sink_result)
+        while let Some(result) = collectors.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => error!(error = %err, "collector task failed"),
+                Err(err) => error!(error = %err, "collector task join failed"),
+            }
+        }
+        match sink_handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => error!(error = %err, "sink task failed"),
+            Err(err) => error!(error = %err, "sink task join failed"),
+        }
     })
     .await;
 
-    match shutdown_result {
-        Ok((opcua_result, sink_result)) => {
-            match opcua_result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => error!(error = %err, "OPC UA task failed"),
-                Err(err) => error!(error = %err, "OPC UA task join failed"),
-            }
-            match sink_result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => error!(error = %err, "sink task failed"),
-                Err(err) => error!(error = %err, "sink task join failed"),
-            }
-        }
-        Err(_) => {
-            error!("shutdown timed out after 30 seconds");
-        }
+    if shutdown_result.is_err() {
+        error!("shutdown timed out after 30 seconds");
     }
 
     Ok(())

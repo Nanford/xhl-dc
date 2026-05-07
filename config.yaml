@@ -4,6 +4,21 @@ opcua:
   identity: anonymous
   session_retry_limit: -1
   application_uri: "urn:KepwareBridge"
+  discovery:
+    enabled: true
+    target_subscription: "fast"
+    root_node_ids:
+      - "ns=2;s=Channel1"
+    include_paths:
+      - "Channel1.Device1"
+    exclude_paths:
+      - "Channel1.Device1._System"
+      - "Channel1.Device1._Statistics"
+    min_namespace_index: 2
+    max_depth_count: 6
+    max_tags_count: 500
+    include_system: false
+    include_arrays: false
 
 mysql:
   url: "mysql://user:pass@127.0.0.1:3306/iot"
@@ -35,6 +50,21 @@ sink:
 buffer:
   path: "./data/wal"
   max_size_mb: 1024
+
+# wcs:
+#   base_url: "http://192.168.1.100:8080/api/v1"
+#   poll_interval_ms: 5000
+#   headers:
+#     Authorization: "Bearer <token>"
+#   timeout_ms: 10000
+#   retry_interval_ms: 5000
+#   endpoints:
+#     - path: "/conveyor/status"
+#       method: GET
+#       tags:
+#         - { json_path: "running", alias: "conveyor_running" }
+#         - { json_path: "speed", alias: "conveyor_speed", value_type: float }
+#         - { json_path: "error_code", alias: "conveyor_error", value_type: int }
 
 metrics:
   bind: "127.0.0.1:9090"

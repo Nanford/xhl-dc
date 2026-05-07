@@ -11,6 +11,7 @@ fn sample(alias: &str, value: f64) -> TagSample {
         source_ts: ts,
         server_ts: ts,
         quality: 0,
+        source: "opcua".to_string(),
     }
 }
 
@@ -50,5 +51,5 @@ fn builds_multi_row_insert_sql() {
     let sql = build_insert_sql("tag_log", 2).expect("sql should build");
 
     assert!(sql.starts_with("INSERT INTO `tag_log`"));
-    assert_eq!(sql.matches("(?, ?, ?, ?, ?, ?, ?, ?)").count(), 2);
+    assert_eq!(sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?)").count(), 2);
 }

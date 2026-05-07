@@ -27,6 +27,7 @@ fn converts_float_variant_to_numeric_sample() {
     assert_eq!(sample.value_num(), Some(12.5));
     assert_eq!(sample.value_str(), None);
     assert_eq!(sample.quality, StatusCode::Good.bits());
+    assert_eq!(sample.source, "opcua");
 }
 
 #[test]

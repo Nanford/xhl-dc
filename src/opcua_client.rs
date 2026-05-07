@@ -15,12 +15,13 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::config::{
-    AppConfig, IdentityConfig, SecurityPolicyConfig, SubscriptionConfig, TagConfig,
+    IdentityConfig, OpcuaConfig, SecurityPolicyConfig, SubscriptionConfig, TagConfig,
 };
 use crate::types::TagSample;
 
 pub async fn run_opcua_client(
-    config: AppConfig,
+    opcua_config: OpcuaConfig,
+    subscriptions: Vec<SubscriptionConfig>,
     sender: mpsc::Sender<TagSample>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
@@ -29,12 +30,12 @@ pub async fn run_opcua_client(
             return Ok(());
         }
 
-        match connect_and_subscribe(&config, sender.clone(), shutdown.clone()).await {
+        match connect_and_subscribe(&opcua_config, &subscriptions, sender.clone(), shutdown.clone()).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 metrics::gauge!("opcua_connected").set(0.0);
                 error!(error = %format_error_chain(&err), "OPC UA session failed");
-                if config.opcua.session_retry_limit == 0 {
+                if opcua_config.session_retry_limit == 0 {
                     return Err(err);
                 }
                 tokio::select! {
@@ -51,37 +52,38 @@ pub async fn run_opcua_client(
 }
 
 async fn connect_and_subscribe(
-    config: &AppConfig,
+    opcua_config: &OpcuaConfig,
+    subscriptions: &[SubscriptionConfig],
     sender: mpsc::Sender<TagSample>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut client = ClientBuilder::new()
         .application_name("Kepware Bridge")
-        .application_uri(&config.opcua.application_uri)
+        .application_uri(&opcua_config.application_uri)
         .create_sample_keypair(true)
         .trust_server_certs(true)
-        .session_retry_limit(config.opcua.session_retry_limit)
+        .session_retry_limit(opcua_config.session_retry_limit)
         .client()
         .map_err(|errors| anyhow::anyhow!("failed to build OPC UA client: {}", errors.join("; ")))?;
 
-    let (security_policy, security_mode) = security_options(config.opcua.security_policy);
+    let (security_policy, security_mode) = security_options(opcua_config.security_policy);
     let fallback_endpoint: EndpointDescription = (
-        config.opcua.endpoint.as_str(),
+        opcua_config.endpoint.as_str(),
         security_policy.to_uri(),
         security_mode,
     )
         .into();
-    let identity = identity_token(&config.opcua.identity);
+    let identity = identity_token(&opcua_config.identity);
 
     info!(
-        endpoint = %config.opcua.endpoint,
-        security_policy = ?config.opcua.security_policy,
+        endpoint = %opcua_config.endpoint,
+        security_policy = ?opcua_config.security_policy,
         "connecting to OPC UA endpoint"
     );
 
     let endpoint = match discover_endpoint(
         &client,
-        &config.opcua.endpoint,
+        &opcua_config.endpoint,
         security_policy.to_uri(),
         security_mode,
     )
@@ -120,7 +122,7 @@ async fn connect_and_subscribe(
     metrics::gauge!("opcua_connected").set(1.0);
     info!("OPC UA session connected");
 
-    for subscription in &config.subscriptions {
+    for subscription in subscriptions {
         create_subscription(&session, subscription, sender.clone()).await?;
     }
 

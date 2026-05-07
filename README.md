@@ -9,6 +9,7 @@ Rust 1.0 版本工业采集服务：从 Kepware/KEPServerEX OPC UA 订阅 tag �
 - Kepware OPC UA Server，本机常见端口 `49320`
 - MySQL，建议 8.0+，生产优先 MySQL 8.4 LTS
 - 可选：`sqlx-cli`
+- 可选：Python + `asyncua` + `PyYAML`，用于半自动发现 Kepware 点位并生成 tag 配置
 
 ## 初始化 MySQL
 
@@ -62,6 +63,83 @@ identity:
 
 ```powershell
 cargo run --bin opcua_endpoints -- opc.tcp://127.0.0.1:49320
+```
+
+## 半自动发现点位
+
+主服务启动时仍然只订阅 `subscriptions[].tags`，不会直接把 browse 到的所有点位自动订阅。`opcua.discovery` 是给辅助脚本使用的发现边界，用来先生成或替换 tag 清单，再由人检查配置后运行服务。
+
+推荐先在 `config.local.yaml` 里配置发现范围：
+
+```yaml
+opcua:
+  discovery:
+    enabled: true
+    target_subscription: "fast"
+    root_node_ids:
+      - "ns=2;s=Channel1"
+    include_paths:
+      - "Channel1.Device1"
+    exclude_paths:
+      - "Channel1.Device1._System"
+      - "Channel1.Device1._Statistics"
+    min_namespace_index: 2
+    max_depth_count: 6
+    max_tags_count: 500
+    include_system: false
+    include_arrays: false
+```
+
+先 dry-run 查看发现结果，不写文件：
+
+```powershell
+python .\scripts\opcua_browse_tags.py --config .\config.local.yaml
+```
+
+确认结果后再写回 `target_subscription` 指定的订阅：
+
+```powershell
+python .\scripts\opcua_browse_tags.py --config .\config.local.yaml --write
+```
+
+如果现场只想临时覆盖某个边界，可以追加命令行参数，例如：
+
+```powershell
+python .\scripts\opcua_browse_tags.py --config .\config.local.yaml --root-node-id "ns=2;s=Channel2" --include-path "Channel2.DeviceA" --limit 200
+```
+
+## WCS HTTP 采集
+
+支持通过 HTTP API 轮询 WCS 数据（如设备故障状态），与 OPC UA 采集共用同一个入库管道。
+
+在 `config.yaml` 或 `config.local.yaml` 中增加 `wcs` 段：
+
+```yaml
+wcs:
+  base_url: "http://192.168.1.100:8080/api/v1"
+  poll_interval_ms: 5000
+  headers:
+    Authorization: "Bearer <token>"
+  timeout_ms: 10000
+  retry_interval_ms: 5000
+  endpoints:
+    - path: "/conveyor/status"
+      method: GET
+      tags:
+        - { json_path: "running", alias: "conveyor_running" }
+        - { json_path: "speed", alias: "conveyor_speed", value_type: float }
+        - { json_path: "error_code", alias: "conveyor_error", value_type: int }
+```
+
+- `json_path` 支持点分路径，如 `data.readings.temp`
+- `value_type` 可选 `bool`（默认）、`int`、`float`、`text`
+- `opcua` 和 `wcs` 可以同时配置，也可以只配其中一个
+- 数据来源通过 `tag_log.source` 列区分（`opcua` 或 `wcs`）
+
+升级数据库：
+
+```powershell
+mysql -u root -p iot < .\migrations\202605080001_add_source_column.sql
 ```
 
 ## 运行

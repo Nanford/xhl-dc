@@ -16,7 +16,7 @@ pub fn install_prometheus(bind: &str) -> anyhow::Result<()> {
 
     describe_counter!(
         "samples_received_total",
-        "Samples accepted from OPC UA callbacks"
+        "Samples accepted from all collectors"
     );
     describe_counter!(
         "dropped_samples_total",
@@ -37,6 +37,14 @@ pub fn install_prometheus(bind: &str) -> anyhow::Result<()> {
     describe_gauge!(
         "opcua_connected",
         "OPC UA connection state, 1 for connected and 0 for disconnected"
+    );
+    describe_gauge!(
+        "wcs_connected",
+        "WCS poller state, 1 for polling and 0 for disconnected"
+    );
+    describe_counter!(
+        "wcs_poll_errors_total",
+        "WCS HTTP poll errors"
     );
 
     Ok(())

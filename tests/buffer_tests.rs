@@ -23,6 +23,7 @@ fn sample(alias: &str, value: f64) -> TagSample {
         source_ts: ts,
         server_ts: ts,
         quality: 0,
+        source: "opcua".to_string(),
     }
 }
 

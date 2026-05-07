@@ -55,6 +55,12 @@ pub struct TagSample {
     pub source_ts: ChronoDateTime<Utc>,
     pub server_ts: ChronoDateTime<Utc>,
     pub quality: u32,
+    #[serde(default = "default_source")]
+    pub source: String,
+}
+
+fn default_source() -> String {
+    "opcua".to_string()
 }
 
 impl TagSample {
@@ -87,7 +93,28 @@ impl TagSample {
             source_ts,
             server_ts,
             quality,
+            source: "opcua".to_string(),
         })
+    }
+
+    pub fn new(
+        node_id: impl Into<String>,
+        alias: impl Into<String>,
+        value: ValueKind,
+        source_ts: ChronoDateTime<Utc>,
+        server_ts: ChronoDateTime<Utc>,
+        quality: u32,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            alias: alias.into(),
+            value,
+            source_ts,
+            server_ts,
+            quality,
+            source: source.into(),
+        }
     }
 
     pub fn value_type_code(&self) -> i8 {

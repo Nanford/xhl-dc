@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -25,12 +26,16 @@ pub enum ConfigError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub opcua: OpcuaConfig,
+    #[serde(default)]
+    pub opcua: Option<OpcuaConfig>,
     pub mysql: MysqlConfig,
+    #[serde(default)]
     pub subscriptions: Vec<SubscriptionConfig>,
     pub sink: SinkConfig,
     pub buffer: BufferConfig,
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub wcs: Option<WcsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +46,32 @@ pub struct OpcuaConfig {
     #[serde(default = "default_retry_limit")]
     pub session_retry_limit: i32,
     pub application_uri: String,
+    #[serde(default)]
+    pub discovery: Option<OpcuaDiscoveryConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpcuaDiscoveryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_discovery_target_subscription")]
+    pub target_subscription: String,
+    #[serde(default)]
+    pub root_node_ids: Vec<String>,
+    #[serde(default)]
+    pub include_paths: Vec<String>,
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+    #[serde(default = "default_discovery_min_namespace_index")]
+    pub min_namespace_index: u16,
+    #[serde(default = "default_discovery_max_depth_count")]
+    pub max_depth_count: u32,
+    #[serde(default = "default_discovery_max_tags_count")]
+    pub max_tags_count: usize,
+    #[serde(default)]
+    pub include_system: bool,
+    #[serde(default)]
+    pub include_arrays: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,29 +150,55 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.opcua.endpoint.trim().is_empty() {
-            return invalid("opcua.endpoint must not be empty");
+        if self.opcua.is_none() && self.wcs.is_none() {
+            return invalid("at least one collector (opcua or wcs) must be configured");
         }
-        if self.opcua.application_uri.trim().is_empty() {
-            return invalid("opcua.application_uri must not be empty");
+
+        if let Some(opcua) = &self.opcua {
+            if opcua.endpoint.trim().is_empty() {
+                return invalid("opcua.endpoint must not be empty");
+            }
+            if opcua.application_uri.trim().is_empty() {
+                return invalid("opcua.application_uri must not be empty");
+            }
+            if opcua.session_retry_limit < -1 {
+                return invalid("opcua.session_retry_limit must be -1 or greater");
+            }
+            opcua.identity.validate()?;
+            if let Some(discovery) = &opcua.discovery {
+                discovery.validate()?;
+            }
+
+            if self.subscriptions.is_empty() {
+                return invalid("subscriptions must not be empty when opcua is configured");
+            }
+            for subscription in &self.subscriptions {
+                subscription.validate()?;
+            }
+            if let Some(discovery) = &opcua.discovery {
+                if discovery.enabled
+                    && !self
+                        .subscriptions
+                        .iter()
+                        .any(|subscription| subscription.name == discovery.target_subscription)
+                {
+                    return invalid(format!(
+                        "opcua.discovery.target_subscription {} does not match any subscription",
+                        discovery.target_subscription
+                    ));
+                }
+            }
         }
-        if self.opcua.session_retry_limit < -1 {
-            return invalid("opcua.session_retry_limit must be -1 or greater");
+
+        if let Some(wcs) = &self.wcs {
+            wcs.validate()?;
         }
-        self.opcua.identity.validate()?;
 
         if self.mysql.url.trim().is_empty() {
             return invalid("mysql.url must not be empty");
         }
         if self.mysql.max_connections == 0 {
             return invalid("mysql.max_connections must be greater than 0");
-        }
-
-        if self.subscriptions.is_empty() {
-            return invalid("subscriptions must not be empty");
-        }
-        for subscription in &self.subscriptions {
-            subscription.validate()?;
         }
 
         validate_mysql_identifier(&self.sink.table)
@@ -165,6 +222,36 @@ impl AppConfig {
             .parse::<SocketAddr>()
             .map_err(|err| ConfigError::Invalid(format!("metrics.bind is invalid: {err}")))?;
 
+        Ok(())
+    }
+}
+
+impl OpcuaDiscoveryConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.target_subscription.trim().is_empty() {
+            return invalid("opcua.discovery.target_subscription must not be empty");
+        }
+        if self.max_depth_count == 0 {
+            return invalid("opcua.discovery.max_depth_count must be greater than 0");
+        }
+        if self.max_tags_count == 0 {
+            return invalid("opcua.discovery.max_tags_count must be greater than 0");
+        }
+        for root_node_id in &self.root_node_ids {
+            if root_node_id.trim().is_empty() {
+                return invalid("opcua.discovery.root_node_ids must not contain empty values");
+            }
+            NodeId::from_str(root_node_id).map_err(|err| {
+                ConfigError::Invalid(format!(
+                    "opcua.discovery.root_node_ids value {root_node_id} is invalid: {err}"
+                ))
+            })?;
+        }
+        validate_discovery_paths("include_paths", &self.include_paths)?;
+        validate_discovery_paths("exclude_paths", &self.exclude_paths)?;
         Ok(())
     }
 }
@@ -237,6 +324,110 @@ impl TagConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WcsConfig {
+    pub base_url: String,
+    #[serde(default = "default_wcs_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default = "default_wcs_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_wcs_retry_interval_ms")]
+    pub retry_interval_ms: u64,
+    pub endpoints: Vec<WcsEndpointConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WcsEndpointConfig {
+    pub path: String,
+    #[serde(default)]
+    pub method: WcsHttpMethod,
+    pub tags: Vec<WcsTagConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WcsHttpMethod {
+    GET,
+    POST,
+}
+
+impl Default for WcsHttpMethod {
+    fn default() -> Self {
+        WcsHttpMethod::GET
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WcsTagConfig {
+    pub json_path: String,
+    pub alias: String,
+    #[serde(default)]
+    pub value_type: WcsValueType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WcsValueType {
+    Bool,
+    Int,
+    Float,
+    Text,
+}
+
+impl Default for WcsValueType {
+    fn default() -> Self {
+        WcsValueType::Bool
+    }
+}
+
+impl WcsConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.base_url.trim().is_empty() {
+            return invalid("wcs.base_url must not be empty");
+        }
+        if self.poll_interval_ms == 0 {
+            return invalid("wcs.poll_interval_ms must be greater than 0");
+        }
+        if self.timeout_ms == 0 {
+            return invalid("wcs.timeout_ms must be greater than 0");
+        }
+        if self.endpoints.is_empty() {
+            return invalid("wcs.endpoints must not be empty");
+        }
+        for endpoint in &self.endpoints {
+            endpoint.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl WcsEndpointConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.path.trim().is_empty() {
+            return invalid("wcs endpoint path must not be empty");
+        }
+        if self.tags.is_empty() {
+            return invalid(format!("wcs endpoint {} tags must not be empty", self.path));
+        }
+        for tag in &self.tags {
+            if tag.json_path.trim().is_empty() {
+                return invalid(format!(
+                    "wcs endpoint {} tag json_path must not be empty",
+                    self.path
+                ));
+            }
+            if tag.alias.trim().is_empty() {
+                return invalid(format!(
+                    "wcs endpoint {} tag alias must not be empty",
+                    self.path
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn invalid<T>(message: impl Into<String>) -> Result<T, ConfigError> {
     Err(ConfigError::Invalid(message.into()))
 }
@@ -255,4 +446,43 @@ fn default_keep_alive_count() -> u32 {
 
 fn default_lifetime_count() -> u32 {
     30
+}
+
+fn default_discovery_target_subscription() -> String {
+    "fast".to_string()
+}
+
+fn default_discovery_min_namespace_index() -> u16 {
+    2
+}
+
+fn default_discovery_max_depth_count() -> u32 {
+    12
+}
+
+fn default_discovery_max_tags_count() -> usize {
+    500
+}
+
+fn validate_discovery_paths(field: &str, paths: &[String]) -> Result<(), ConfigError> {
+    for path in paths {
+        if path.trim().is_empty() {
+            return invalid(format!(
+                "opcua.discovery.{field} must not contain empty values"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn default_wcs_poll_interval_ms() -> u64 {
+    5000
+}
+
+fn default_wcs_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_wcs_retry_interval_ms() -> u64 {
+    5000
 }
