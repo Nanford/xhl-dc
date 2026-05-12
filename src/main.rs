@@ -7,7 +7,7 @@ use kepware_bridge::buffer::SampleBuffer;
 use kepware_bridge::config::AppConfig;
 use kepware_bridge::metrics::install_prometheus;
 use kepware_bridge::opcua_client::run_opcua_client;
-use kepware_bridge::sink::{connect_mysql, SinkWorker};
+use kepware_bridge::sink::{connect_mysql, SinkTableRouter, SinkWorker};
 use kepware_bridge::wcs_client::run_wcs_client;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -33,9 +33,11 @@ async fn main() -> anyhow::Result<()> {
     let (sample_tx, sample_rx) = mpsc::channel::<kepware_bridge::types::TagSample>(10_000);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let sink_router =
+        SinkTableRouter::from_config(&config.sink).context("failed to build sink table router")?;
     let sink_worker = SinkWorker::new(
         mysql_pool,
-        config.sink.table.clone(),
+        sink_router,
         sample_rx,
         shutdown_rx.clone(),
         buffer,

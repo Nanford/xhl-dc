@@ -22,7 +22,14 @@ subscriptions:
       - { node_id: "ns=2;s=Channel1.Device1.Temperature", alias: "temp_1" }
 
 sink:
-  table: "tag_log"
+  table: "ylk_alarm_log"
+  tag_prefix_routes:
+    FSC1:
+      table: "cpk_alarm_log"
+    FLK1:
+      table: "flk_alarm_log"
+    YLK1:
+      table: "ylk_alarm_log"
   batch_size: 500
   flush_interval_ms: 1000
 
@@ -41,7 +48,8 @@ fn parses_valid_config() {
 
     assert_eq!(config.opcua.as_ref().unwrap().endpoint, "opc.tcp://127.0.0.1:49320");
     assert_eq!(config.subscriptions[0].tags[0].alias, "temp_1");
-    assert_eq!(config.sink.table, "tag_log");
+    assert_eq!(config.sink.table, "ylk_alarm_log");
+    assert_eq!(config.sink.tag_prefix_routes["FSC1"].table, "cpk_alarm_log");
 }
 
 #[test]
@@ -76,7 +84,7 @@ fn rejects_invalid_node_id() {
 
 #[test]
 fn rejects_unsafe_table_name() {
-    let yaml = valid_yaml().replace("table: \"tag_log\"", "table: \"tag_log;drop\"");
+    let yaml = valid_yaml().replace("table: \"ylk_alarm_log\"", "table: \"tag_log;drop\"");
 
     let err = AppConfig::from_yaml_str(&yaml).expect_err("table name must be a MySQL identifier");
 
@@ -115,6 +123,24 @@ fn parses_enabled_opcua_discovery_config() {
     assert_eq!(discovery.min_namespace_index, 2);
     assert_eq!(discovery.max_depth_count, 6);
     assert_eq!(discovery.max_tags_count, 200);
+}
+
+#[test]
+fn parses_opcua_description_map_path() {
+    let yaml = valid_yaml().replace(
+        "  application_uri: \"urn:KepwareBridge\"",
+        "  application_uri: \"urn:KepwareBridge\"\n  description_map_path: \"./tag_descriptions.yaml\"",
+    );
+
+    let config = AppConfig::from_yaml_str(&yaml).expect("description map path should parse");
+
+    assert_eq!(
+        config
+            .opcua
+            .as_ref()
+            .and_then(|opcua| opcua.description_map_path.as_deref()),
+        Some("./tag_descriptions.yaml")
+    );
 }
 
 #[test]
@@ -184,7 +210,7 @@ wcs:
         - { json_path: "speed", alias: "conveyor_speed", value_type: float }
 
 sink:
-  table: "tag_log"
+  table: "ylk_alarm_log"
   batch_size: 500
   flush_interval_ms: 1000
 
@@ -229,7 +255,7 @@ mysql:
   url: "mysql://user:pass@127.0.0.1:3306/iot"
 
 sink:
-  table: "tag_log"
+  table: "ylk_alarm_log"
   batch_size: 500
   flush_interval_ms: 1000
 
@@ -269,7 +295,7 @@ wcs:
   endpoints: []
 
 sink:
-  table: "tag_log"
+  table: "ylk_alarm_log"
   batch_size: 500
   flush_interval_ms: 1000
 

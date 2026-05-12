@@ -1,149 +1,133 @@
 # Kepware Bridge
 
-Rust 1.0 版本工业采集服务：从 Kepware/KEPServerEX OPC UA 订阅 tag 数据，批量写入 MySQL，写库失败时落到本地 sled 缓冲，后续自动回灌。
+工业数据采集服务，从 Kepware/KEPServerEX OPC UA 订阅点位变化，批量写入 MySQL。写库失败时先落到本地 sled 缓冲，后续自动回灌，避免数据库短暂不可用导致数据直接丢失。
 
-## 本机准备
+## 当前写库目标
 
-- Windows + PowerShell
-- Rust 1.75+，本仓库已按 Edition 2021 编写
-- Kepware OPC UA Server，本机常见端口 `49320`
-- MySQL，建议 8.0+，生产优先 MySQL 8.4 LTS
-- 可选：`sqlx-cli`
-- 可选：Python + `asyncua` + `PyYAML`，用于半自动发现 Kepware 点位并生成 tag 配置
+报警数据写入三张结构一致的表，按点位第一个字段路由：
 
-## 初始化 MySQL
+- `cpk_alarm_log`
+- `flk_alarm_log`
+- `ylk_alarm_log`
 
-先创建数据库，再执行迁移：
-
-```powershell
-mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS iot CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
-mysql -u root -p iot < .\migrations\202605060001_create_tag_log.sql
-mysql -u root -p iot < .\migrations\202605080001_add_source_column.sql
-```
-
-如果你已安装 `sqlx-cli`，也可以执行：
-
-```powershell
-sqlx migrate run --database-url "mysql://user:pass@127.0.0.1:3306/iot"
-```
-
-## 配置
-
-默认读取 `.\config.yaml`。运行前至少修改：
-
-- `opcua.endpoint`
-- `mysql.url`
-- `subscriptions[].tags[].node_id`
-- `subscriptions[].tags[].alias`
-
-本机私有配置建议写到 `config.local.yaml`，该文件已被 `.gitignore` 忽略，适合放真实 MySQL 密码和现场点位。
-
-Kepware 字符串点位通常是：
+`config.yaml` 中的 `sink.table` 是兜底表，`sink.tag_prefix_routes` 是区域编码到目标表的对照表。现场新增区域编码时，只需要改配置，不需要重新编译。
 
 ```yaml
-node_id: "ns=2;s=Channel1.Device1.Temperature"
+sink:
+  table: "ylk_alarm_log"
+  tag_prefix_routes:
+    WH_CP_Zone01:
+      table: "cpk_alarm_log"
+    FSC1:
+      table: "cpk_alarm_log"
+    FSC2:
+      table: "cpk_alarm_log"
+    FLK1:
+      table: "flk_alarm_log"
+    YLK1:
+      table: "ylk_alarm_log"
+  batch_size: 500
+  flush_interval_ms: 1000
 ```
 
-测试期可以用：
+## 字段解析规则
+
+采集到的 OPC UA `node_id` 通常形如 `ns=2;s=完整点位路径`。程序优先从 `;s=` 后面的完整点位路径解析；如果不是 OPC UA 字符串 NodeId，则回退使用 `alias`。
+
+### WH_CP_Zone01 报警点位
+
+示例：
+
+```text
+WH_CP_Zone01.Convey.Conveyor.M5035.Alarm.DriveFault
+WH_CP_Zone01.Convey.CSC02.Alarm.FROM_CSC02_SSJCS_Fault
+```
+
+写库字段：
+
+- `location`: `WH_CP_Zone01`
+- `device`: `Conveyor`；如果没有设备分类层级，则取 `CSC02`
+- `device_id`: `M5035`；如果没有下一层设备编号，则与 `device` 相同
+- `tag`: `Alarm` 后面的最后点位名，如 `DriveFault`
+- `tag_value`: 采样值字符串，如 `true`、`false`、`6`
+- `tag_state`: 非零/`true` 写 `active`，零/`false` 写 `inactive`
+- `description`: 优先写入 Kepware 标签说明；读取不到时留空，或由映射文件补充
+
+### FSC/Iscs 点位
+
+示例：
+
+```text
+FSC2.InBound.Iscs.BF-1_1_1.MTR-1_1_1_MTR.Details.DS
+FSC1.OutBound.Iscs.BC-1_0_0-BC5191.MTR-1_0_0-BC5191_MTR.Details.DS
+```
+
+写库字段：
+
+- `location`: `FSC2` 或 `FSC1`
+- `device`: `BF-1_1_1`、`BC-1_0_0-BC5191`
+- `device_id`: 从设备编码中提取中间编号，如 `1_1_1`、`1_0_0`
+- `tag`: 从 `Iscs` 开始保留完整后缀，如 `Iscs.BF-1_1_1.MTR-1_1_1_MTR.Details.DS`
+- `tag_value`: 采样值字符串
+- `tag_state`: 非零/`true` 写 `active`，零/`false` 写 `inactive`
+- `description`: 优先写入 Kepware 标签说明；读取不到时留空，或由映射文件补充
+
+## 故障描述来源
+
+Kepware 标签属性编辑器中的“说明”可以通过属性点读取。程序会在创建订阅前，对每个采集点尝试读取同路径的 `._Description` 属性点，例如：
+
+```text
+ns=2;s=WH_CPK_Zone01.convey.conveyor.M5001.Alarm.error1
+ns=2;s=WH_CPK_Zone01.convey.conveyor.M5001.Alarm.error1._Description
+```
+
+读取成功后，报警入库的 `description` 字段写入 Kepware 中维护的中文说明，例如 `错误1`。这一步只发生在订阅初始化阶段，不进入 OPC UA 数据变更回调。
+
+描述优先级：
+
+1. `subscriptions[].tags[].description`
+2. `opcua.description_map_path` 指向的映射文件
+3. Kepware `Tag._Description`
+4. OPC UA 标准 `Description` 属性
+
+现场点位很多时，不建议在 `subscriptions[].tags` 里手工维护所有中文描述。点位清单仍由配置或浏览脚本生成；描述优先从 Kepware 读取。只有 Kepware 没有维护说明、现场需要覆盖说明，或个别点位说明不规范时，再使用映射文件补充。
+
+映射文件使用 YAML，键可以写完整 NodeId，也可以只写 `;s=` 后面的点位路径：
 
 ```yaml
-security_policy: None
-identity: anonymous
+ns=2;s=WH_CPK_Zone01.convey.conveyor.M5001.Alarm.error1: "错误1"
+WH_CPK_Zone01.convey.conveyor.M5001.Alarm.error2: "错误2"
 ```
 
-生产应切到：
-
-```yaml
-security_policy: Basic256Sha256
-identity:
-  username: "kepware_user"
-  password: "change_me"
-```
-
-可以先用 discovery 工具查看 Kepware 实际开放的 endpoint：
-
-```powershell
-cargo run --bin opcua_endpoints -- opc.tcp://127.0.0.1:49320
-```
-
-## 半自动发现点位
-
-主服务启动时仍然只订阅 `subscriptions[].tags`，不会直接把 browse 到的所有点位自动订阅。`opcua.discovery` 是给辅助脚本使用的发现边界，用来先生成或替换 tag 清单，再由人检查配置后运行服务。
-
-推荐先在 `config.local.yaml` 里配置发现范围：
+配置入口：
 
 ```yaml
 opcua:
-  discovery:
-    enabled: true
-    target_subscription: "fast"
-    root_node_ids:
-      - "ns=2;s=Channel1"
-    include_paths:
-      - "Channel1.Device1"
-    exclude_paths:
-      - "Channel1.Device1._System"
-      - "Channel1.Device1._Statistics"
-    min_namespace_index: 2
-    max_depth_count: 6
-    max_tags_count: 500
-    include_system: false
-    include_arrays: false
+  description_map_path: "./description_map.yaml"
 ```
 
-先 dry-run 查看发现结果，不写文件：
+## 数据库表结构
+
+生产库已存在三张报警表。仓库中的 `migrations/202605120001_create_alarm_log_tables.sql` 提供同结构建表脚本，用于新环境初始化或本地验证。
 
 ```powershell
-python .\scripts\opcua_browse_tags.py --config .\config.local.yaml
+mysql -u root -p iot < .\migrations\202605120001_create_alarm_log_tables.sql
 ```
 
-确认结果后再写回 `target_subscription` 指定的订阅：
+## 运行配置
 
-```powershell
-python .\scripts\opcua_browse_tags.py --config .\config.local.yaml --write
-```
+默认读取 `config.yaml`。现场真实连接、账号密码和点位清单建议放在未提交的 `config.local.yaml`。
 
-如果现场只想临时覆盖某个边界，可以追加命令行参数，例如：
+关键配置：
 
-```powershell
-python .\scripts\opcua_browse_tags.py --config .\config.local.yaml --root-node-id "ns=2;s=Channel2" --include-path "Channel2.DeviceA" --limit 200
-```
+- `opcua.endpoint`: Kepware OPC UA 地址
+- `opcua.description_map_path`: 可选描述映射文件；用于覆盖或补充 Kepware 说明
+- `mysql.url`: MySQL 连接串
+- `subscriptions[].tags[].node_id`: OPC UA NodeId
+- `subscriptions[].tags[].alias`: 点位别名；建议保留完整点位路径，便于非 OPC UA 来源复用同一套解析规则
+- `sink.tag_prefix_routes`: 区域编码到报警表的路由表
 
-## WCS HTTP 采集
-
-支持通过 HTTP API 轮询 WCS 数据（如设备故障状态），与 OPC UA 采集共用同一个入库管道。
-
-在 `config.yaml` 或 `config.local.yaml` 中增加 `wcs` 段：
-
-```yaml
-wcs:
-  base_url: "http://192.168.1.100:8080/api/v1"
-  poll_interval_ms: 5000
-  headers:
-    Authorization: "Bearer <token>"
-  timeout_ms: 10000
-  retry_interval_ms: 5000
-  endpoints:
-    - path: "/conveyor/status"
-      method: GET
-      tags:
-        - { json_path: "running", alias: "conveyor_running" }
-        - { json_path: "speed", alias: "conveyor_speed", value_type: float }
-        - { json_path: "error_code", alias: "conveyor_error", value_type: int }
-```
-
-- `json_path` 支持点分路径，如 `data.readings.temp`
-- `value_type` 可选 `bool`（默认）、`int`、`float`、`text`
-- `opcua` 和 `wcs` 可以同时配置，也可以只配其中一个
-- 数据来源通过 `tag_log.source` 列区分（`opcua` 或 `wcs`）
-
-升级数据库：
-
-```powershell
-mysql -u root -p iot < .\migrations\202605080001_add_source_column.sql
-```
-
-## 运行
+运行：
 
 ```powershell
 $env:RUST_LOG = "info,sqlx=warn,opcua=warn"
@@ -157,29 +141,48 @@ cargo build --release
 .\target\release\kepware-bridge.exe --config .\config.yaml
 ```
 
-查看 metrics：
+## 点位发现
+
+辅助浏览工具可以从 Kepware 输出点位清单：
 
 ```powershell
-curl http://127.0.0.1:9090/metrics
+cargo run --bin browse_tags -- opc.tcp://127.0.0.1:49320 8
 ```
 
-## Kepware 检查项
+输出文件：
 
-- Project Properties -> OPC UA 中确认允许匿名登录，或者配置用户名密码。
-- 客户端会话最大数不能是 `0`。
-- Windows 防火墙允许 OPC UA 端口，常见为 `49320`。
-- 修改 Kepware 配置后保存项目。
-- 生产长连接使用有线网络。
+- `browse_output.txt`: 全量浏览结果
+- `browse_alarm.txt`: 按故障/报警关键词筛选后的结果
 
-## 验证命令
+Python 脚本支持按配置边界写回订阅点位：
 
 ```powershell
-cargo fmt --all
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build --release
+python .\scripts\opcua_browse_tags.py --config .\config.local.yaml --write
 ```
 
-## Linux 部署提示
+## 中文字段与字符集
 
-Linux 上使用同一份 release binary 或重新编译后运行。建议通过 systemd 托管，`buffer.path` 放到持久化目录，例如 `/var/lib/kepware-bridge/wal`。容器化时必须挂载该目录，否则写库失败时的缓冲数据会在容器重建后丢失。
+报警表中的 `location`、`device`、`device_id`、`tag`、`tag_state`、`tag_value` 使用 `VARCHAR`，`description` 使用 `TEXT`。这组类型可以存储中文报警描述，不需要改成 JSON 或二进制字段。
+
+建库和建表脚本使用 `utf8mb4`：
+
+```sql
+CREATE DATABASE IF NOT EXISTS `iot_alarm_sc` DEFAULT CHARSET utf8mb4;
+...
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+MySQL 8 环境下显示为 `utf8mb4_0900_ai_ci` 是正常结果。连接串可以显式带上字符集，避免客户端连接沿用非 UTF-8 默认值：
+
+```yaml
+mysql:
+  url: "mysql://user:pass@127.0.0.1:3306/iot_alarm_sc?ssl-mode=DISABLED&charset=utf8mb4"
+```
+
+## 运行约束
+
+- OPC UA 回调只做轻量转换和 `mpsc::try_send`，不直接写数据库。
+- Sink Worker 负责批量写入、失败缓冲和重启后回灌。
+- `buffer.path` 必须放在持久化磁盘目录。
+- 生产环境建议使用 `Basic256Sha256 + Sign and Encrypt + 用户名密码`。
+- 日志输出到 stdout/stderr，metrics 默认绑定 `127.0.0.1:9090`。

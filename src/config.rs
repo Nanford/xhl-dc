@@ -47,6 +47,8 @@ pub struct OpcuaConfig {
     pub session_retry_limit: i32,
     pub application_uri: String,
     #[serde(default)]
+    pub description_map_path: Option<String>,
+    #[serde(default)]
     pub discovery: Option<OpcuaDiscoveryConfig>,
 }
 
@@ -117,13 +119,24 @@ pub struct TagConfig {
     pub alias: String,
     #[serde(default)]
     pub device: String,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SinkConfig {
     pub table: String,
+    #[serde(default)]
+    pub tag_prefix_routes: HashMap<String, SinkTableRouteConfig>,
     pub batch_size: usize,
     pub flush_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SinkTableRouteConfig {
+    pub table: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +177,11 @@ impl AppConfig {
             }
             if opcua.application_uri.trim().is_empty() {
                 return invalid("opcua.application_uri must not be empty");
+            }
+            if let Some(path) = &opcua.description_map_path {
+                if path.trim().is_empty() {
+                    return invalid("opcua.description_map_path must not be empty");
+                }
             }
             if opcua.session_retry_limit < -1 {
                 return invalid("opcua.session_retry_limit must be -1 or greater");
@@ -207,6 +225,19 @@ impl AppConfig {
 
         validate_mysql_identifier(&self.sink.table)
             .map_err(|err| ConfigError::Invalid(format!("sink.table: {err}")))?;
+        for (prefix, route) in &self.sink.tag_prefix_routes {
+            if prefix.trim().is_empty() {
+                return invalid("sink.tag_prefix_routes key must not be empty");
+            }
+            if prefix.contains('.') {
+                return invalid(format!(
+                    "sink.tag_prefix_routes key {prefix} must be the first tag segment only"
+                ));
+            }
+            validate_mysql_identifier(&route.table).map_err(|err| {
+                ConfigError::Invalid(format!("sink.tag_prefix_routes.{prefix}.table: {err}"))
+            })?;
+        }
         if self.sink.batch_size == 0 {
             return invalid("sink.batch_size must be greater than 0");
         }
@@ -370,6 +401,10 @@ pub struct WcsTagConfig {
     pub alias: String,
     #[serde(default)]
     pub device: String,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub description: String,
     #[serde(default)]
     pub value_type: WcsValueType,
 }

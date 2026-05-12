@@ -4,6 +4,8 @@ opcua:
   identity: anonymous
   session_retry_limit: -1
   application_uri: "urn:KepwareBridge"
+  # Optional. The program reads Kepware Tag._Description first; this file is only for overrides.
+  # description_map_path: "./description_map.yaml"
   discovery:
     enabled: true
     target_subscription: "fast"
@@ -21,7 +23,7 @@ opcua:
     include_arrays: false
 
 mysql:
-  url: "mysql://user:pass@127.0.0.1:3306/iot"
+  url: "mysql://user:pass@127.0.0.1:3306/iot?charset=utf8mb4"
   max_connections: 8
 
 subscriptions:

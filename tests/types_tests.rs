@@ -20,6 +20,8 @@ fn converts_float_variant_to_numeric_sample() {
         "temp_1",
         "原料库",
         "SSJ",
+        "SSJ-01",
+        "温度报警",
         data_value(Variant::Double(12.5)),
     )
     .expect("double values should be supported");
@@ -32,6 +34,8 @@ fn converts_float_variant_to_numeric_sample() {
     assert_eq!(sample.source, "opcua");
     assert_eq!(sample.area, "原料库");
     assert_eq!(sample.device, "SSJ");
+    assert_eq!(sample.device_id, "SSJ-01");
+    assert_eq!(sample.description, "温度报警");
 }
 
 #[test]
@@ -39,6 +43,8 @@ fn converts_bool_variant_to_bool_sample() {
     let sample = TagSample::from_data_value(
         "ns=2;s=Channel1.Device1.Running",
         "running_1",
+        "",
+        "",
         "",
         "",
         data_value(Variant::Boolean(true)),
@@ -55,6 +61,8 @@ fn rejects_empty_variant() {
     let err = TagSample::from_data_value(
         "ns=2;s=Channel1.Device1.Empty",
         "empty_1",
+        "",
+        "",
         "",
         "",
         data_value(Variant::Empty),

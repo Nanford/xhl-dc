@@ -21,6 +21,8 @@ fn sample(alias: &str, value: f64) -> TagSample {
         alias: alias.to_string(),
         area: String::new(),
         device: String::new(),
+        device_id: String::new(),
+        description: String::new(),
         value: ValueKind::Float(value),
         source_ts: ts,
         server_ts: ts,

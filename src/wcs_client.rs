@@ -137,6 +137,8 @@ async fn poll_endpoint_inner(
                     &tag.alias,
                     &endpoint.area,
                     &tag.device,
+                    &tag.device_id,
+                    &tag.description,
                     value,
                     now,
                     now,
@@ -276,6 +278,8 @@ mod tests {
                 json_path: json_path.to_string(),
                 alias: json_path.to_string(),
                 device: String::new(),
+                device_id: String::new(),
+                description: String::new(),
                 value_type,
             }],
         }
