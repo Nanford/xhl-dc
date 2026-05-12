@@ -7,6 +7,8 @@ fn sample(alias: &str, value: f64) -> TagSample {
     TagSample {
         node_id: format!("ns=2;s=Channel1.Device1.{alias}"),
         alias: alias.to_string(),
+        area: String::new(),
+        device: String::new(),
         value: ValueKind::Float(value),
         source_ts: ts,
         server_ts: ts,
@@ -51,5 +53,5 @@ fn builds_multi_row_insert_sql() {
     let sql = build_insert_sql("tag_log", 2).expect("sql should build");
 
     assert!(sql.starts_with("INSERT INTO `tag_log`"));
-    assert_eq!(sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?)").count(), 2);
+    assert_eq!(sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").count(), 2);
 }

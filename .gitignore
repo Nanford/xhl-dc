@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .env
 config.local.yaml
+/deploy
+logs
+alarm_tag.sql

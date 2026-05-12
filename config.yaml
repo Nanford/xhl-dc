@@ -26,24 +26,26 @@ mysql:
 
 subscriptions:
   - name: "fast"
+    area: "原料库"
     publishing_interval_ms: 500
     keep_alive_count: 10
     lifetime_count: 30
     max_notifications_per_publish: 0
     priority: 0
     tags:
-      - { node_id: "ns=2;s=Channel1.Device1.Temperature", alias: "temp_1" }
+      - { node_id: "ns=2;s=Channel1.Device1.Temperature", alias: "temp_1", device: "SSJ" }
   - name: "slow"
+    area: "成品库"
     publishing_interval_ms: 5000
     keep_alive_count: 10
     lifetime_count: 30
     max_notifications_per_publish: 0
     priority: 0
     tags:
-      - { node_id: "ns=2;s=Channel1.Device1.Pressure", alias: "press_1" }
+      - { node_id: "ns=2;s=Channel1.Device1.Pressure", alias: "press_1", device: "FJJ" }
 
 sink:
-  table: "tag_log"
+  table: "dt_alarm_log"
   batch_size: 500
   flush_interval_ms: 1000
 
@@ -60,11 +62,11 @@ buffer:
 #   retry_interval_ms: 5000
 #   endpoints:
 #     - path: "/conveyor/status"
+#       area: "辅料库"
 #       method: GET
 #       tags:
-#         - { json_path: "running", alias: "conveyor_running" }
-#         - { json_path: "speed", alias: "conveyor_speed", value_type: float }
-#         - { json_path: "error_code", alias: "conveyor_error", value_type: int }
+#         - { json_path: "running", alias: "conveyor_running", device: "SSJ" }
+#         - { json_path: "speed", alias: "conveyor_speed", device: "SSJ", value_type: float }
 
 metrics:
   bind: "127.0.0.1:9090"

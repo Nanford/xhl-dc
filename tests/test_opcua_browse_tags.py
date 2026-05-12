@@ -113,6 +113,76 @@ subscriptions:
         self.assertEqual(updated["subscriptions"][0]["tags"], tags)
         self.assertEqual(updated["subscriptions"][1]["tags"], [{"node_id": "ns=2;s=Old", "alias": "old"}])
 
+    def test_discovery_options_use_enabled_config_boundaries(self):
+        config = yaml.safe_load(
+            """
+opcua:
+  endpoint: "opc.tcp://127.0.0.1:49320"
+  discovery:
+    enabled: true
+    target_subscription: "slow"
+    root_node_ids:
+      - "ns=2;s=Channel1"
+    include_paths:
+      - "Channel1.Device1"
+    exclude_paths:
+      - "Channel1.Device1._System"
+    min_namespace_index: 2
+    max_depth_count: 6
+    max_tags_count: 200
+    include_system: false
+    include_arrays: true
+"""
+        )
+
+        options = opcua_browse_tags.discovery_options_from_config(config)
+
+        self.assertEqual(options.target_subscription, "slow")
+        self.assertEqual(options.root_node_ids, ["ns=2;s=Channel1"])
+        self.assertEqual(options.include_paths, [["Channel1", "Device1"]])
+        self.assertEqual(options.exclude_paths, [["Channel1", "Device1", "_System"]])
+        self.assertEqual(options.min_namespace_index, 2)
+        self.assertEqual(options.max_depth_count, 6)
+        self.assertEqual(options.max_tags_count, 200)
+        self.assertTrue(options.include_arrays)
+
+    def test_exclude_paths_skip_matching_branches(self):
+        blocked = opcua_browse_tags.TagCandidate(
+            "ns=2;s=Channel1.Device1._System.Internal",
+            ["Channel1", "Device1", "_System", "Internal"],
+            "Double",
+            -1,
+        )
+        allowed = opcua_browse_tags.TagCandidate(
+            "ns=2;s=Channel1.Device1.Temperature",
+            ["Channel1", "Device1", "Temperature"],
+            "Double",
+            -1,
+        )
+        include_paths = [opcua_browse_tags.parse_include_path("Channel1.Device1")]
+        exclude_paths = [opcua_browse_tags.parse_include_path("Channel1.Device1._System")]
+
+        self.assertFalse(
+            opcua_browse_tags.should_collect_candidate(
+                blocked,
+                min_namespace=2,
+                include_system=True,
+                include_arrays=False,
+                include_paths=include_paths,
+                exclude_paths=exclude_paths,
+            )
+        )
+        self.assertTrue(
+            opcua_browse_tags.should_collect_candidate(
+                allowed,
+                min_namespace=2,
+                include_system=True,
+                include_arrays=False,
+                include_paths=include_paths,
+                exclude_paths=exclude_paths,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

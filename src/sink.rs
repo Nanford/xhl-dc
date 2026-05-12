@@ -42,14 +42,14 @@ pub fn build_insert_sql(table: &str, rows: usize) -> Result<String, SinkError> {
         return Err(SinkError::EmptyInsert);
     }
 
-    let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .take(rows)
         .collect::<Vec<_>>()
         .join(", ");
 
     Ok(format!(
         "INSERT INTO `{table}` \
-         (`node_id`, `alias`, `value_type`, `value_num`, `value_str`, `source_ts`, `server_ts`, `quality`, `source`) \
+         (`node_id`, `alias`, `area`, `device`, `value_type`, `value_num`, `value_str`, `source_ts`, `server_ts`, `quality`, `source`) \
          VALUES {placeholders}"
     ))
 }
@@ -76,6 +76,8 @@ pub async fn insert_samples(
         query = query
             .bind(&sample.node_id)
             .bind(&sample.alias)
+            .bind(&sample.area)
+            .bind(&sample.device)
             .bind(sample.value_type_code())
             .bind(sample.value_num())
             .bind(sample.value_str())

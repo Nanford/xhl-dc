@@ -5,7 +5,7 @@ use opcua::client::ClientBuilder;
 async fn main() -> anyhow::Result<()> {
     let endpoint = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "opc.tcp://127.0.0.1:49320".to_string());
+        .unwrap_or_else(|| "opc.tcp://127.0.0.1:49321".to_string());
     let client = ClientBuilder::new()
         .application_name("Kepware Bridge Endpoint Probe")
         .application_uri("urn:KepwareBridgeEndpointProbe")

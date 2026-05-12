@@ -97,6 +97,8 @@ pub struct MysqlConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionConfig {
     pub name: String,
+    #[serde(default)]
+    pub area: String,
     pub publishing_interval_ms: u64,
     #[serde(default = "default_keep_alive_count")]
     pub keep_alive_count: u32,
@@ -113,6 +115,8 @@ pub struct SubscriptionConfig {
 pub struct TagConfig {
     pub node_id: String,
     pub alias: String,
+    #[serde(default)]
+    pub device: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,6 +346,8 @@ pub struct WcsConfig {
 pub struct WcsEndpointConfig {
     pub path: String,
     #[serde(default)]
+    pub area: String,
+    #[serde(default)]
     pub method: WcsHttpMethod,
     pub tags: Vec<WcsTagConfig>,
 }
@@ -362,6 +368,8 @@ impl Default for WcsHttpMethod {
 pub struct WcsTagConfig {
     pub json_path: String,
     pub alias: String,
+    #[serde(default)]
+    pub device: String,
     #[serde(default)]
     pub value_type: WcsValueType,
 }

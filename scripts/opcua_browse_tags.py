@@ -27,6 +27,10 @@ SUPPORTED_DATA_TYPES = {
 }
 
 SYSTEM_PATH_MARKERS = {"_System", "_Statistics"}
+DEFAULT_TARGET_SUBSCRIPTION = "fast"
+DEFAULT_MIN_NAMESPACE_INDEX = 2
+DEFAULT_MAX_DEPTH_COUNT = 12
+DEFAULT_MAX_TAGS_COUNT = 500
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,20 @@ class TagCandidate:
     browse_path: list[str]
     data_type: str
     value_rank: int | None
+
+
+@dataclass(frozen=True)
+class DiscoveryOptions:
+    enabled: bool
+    target_subscription: str
+    root_node_ids: list[str]
+    include_paths: list[list[str]]
+    exclude_paths: list[list[str]]
+    min_namespace_index: int
+    max_depth_count: int
+    max_tags_count: int
+    include_system: bool
+    include_arrays: bool
 
 
 def namespace_index_from_node_id(node_id: str) -> int:
@@ -58,19 +76,27 @@ def matches_include_paths(path: list[str], include_paths: list[list[str]]) -> bo
     return any(path[: len(include_path)] == include_path for include_path in include_paths)
 
 
+def matches_exclude_paths(path: list[str], exclude_paths: list[list[str]]) -> bool:
+    return any(path[: len(exclude_path)] == exclude_path for exclude_path in exclude_paths)
+
+
 def should_collect_candidate(
     candidate: TagCandidate,
     min_namespace: int,
     include_system: bool,
     include_arrays: bool,
     include_paths: list[list[str]] | None = None,
+    exclude_paths: list[list[str]] | None = None,
 ) -> bool:
     include_paths = include_paths or []
+    exclude_paths = exclude_paths or []
     if namespace_index_from_node_id(candidate.node_id) < min_namespace:
         return False
     if not include_system and is_system_path(candidate.browse_path):
         return False
     if not matches_include_paths(candidate.browse_path, include_paths):
+        return False
+    if matches_exclude_paths(candidate.browse_path, exclude_paths):
         return False
     if candidate.data_type not in SUPPORTED_DATA_TYPES:
         return False
@@ -128,6 +154,76 @@ def write_config(path: pathlib.Path, config: dict) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
+def list_of_strings(value, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"opcua.discovery.{field} must be a list")
+
+    items = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"opcua.discovery.{field} must contain non-empty strings")
+        items.append(item.strip())
+    return items
+
+
+def positive_int(value, field: str, default: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"opcua.discovery.{field} must be greater than 0")
+    return value
+
+
+def bool_value(value, field: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"opcua.discovery.{field} must be true or false")
+    return value
+
+
+def discovery_options_from_config(config: dict) -> DiscoveryOptions:
+    opcua = config.get("opcua") if isinstance(config, dict) else {}
+    discovery = opcua.get("discovery") if isinstance(opcua, dict) else {}
+    enabled = bool_value(discovery.get("enabled"), "enabled", False) if isinstance(discovery, dict) else False
+    if not enabled:
+        discovery = {}
+
+    target_subscription = discovery.get("target_subscription", DEFAULT_TARGET_SUBSCRIPTION)
+    if not isinstance(target_subscription, str) or not target_subscription.strip():
+        raise ValueError("opcua.discovery.target_subscription must not be empty")
+
+    include_paths = [parse_include_path(value) for value in list_of_strings(discovery.get("include_paths"), "include_paths")]
+    exclude_paths = [parse_include_path(value) for value in list_of_strings(discovery.get("exclude_paths"), "exclude_paths")]
+
+    return DiscoveryOptions(
+        enabled=enabled,
+        target_subscription=target_subscription.strip(),
+        root_node_ids=list_of_strings(discovery.get("root_node_ids"), "root_node_ids"),
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        min_namespace_index=positive_int(
+            discovery.get("min_namespace_index"),
+            "min_namespace_index",
+            DEFAULT_MIN_NAMESPACE_INDEX,
+        ),
+        max_depth_count=positive_int(
+            discovery.get("max_depth_count"),
+            "max_depth_count",
+            DEFAULT_MAX_DEPTH_COUNT,
+        ),
+        max_tags_count=positive_int(
+            discovery.get("max_tags_count"),
+            "max_tags_count",
+            DEFAULT_MAX_TAGS_COUNT,
+        ),
+        include_system=bool_value(discovery.get("include_system"), "include_system", False),
+        include_arrays=bool_value(discovery.get("include_arrays"), "include_arrays", False),
+    )
+
+
 def node_id_to_string(nodeid) -> str:
     to_string = getattr(nodeid, "to_string", None)
     if callable(to_string):
@@ -156,8 +252,12 @@ async def browse_candidates(
     include_system: bool,
     include_arrays: bool,
     include_paths: list[list[str]] | None = None,
+    exclude_paths: list[list[str]] | None = None,
+    root_node_ids: list[str] | None = None,
 ) -> list[TagCandidate]:
     include_paths = include_paths or []
+    exclude_paths = exclude_paths or []
+    root_node_ids = root_node_ids or []
     candidates: list[TagCandidate] = []
     visited: set[str] = set()
 
@@ -205,6 +305,7 @@ async def browse_candidates(
                     include_system,
                     include_arrays,
                     include_paths,
+                    exclude_paths,
                 ):
                     candidates.append(candidate)
                 continue
@@ -213,7 +314,18 @@ async def browse_candidates(
                 if include_system or not is_system_path(child_path):
                     await browse_node(child, child_path, depth + 1)
 
-    await browse_node(client.get_objects_node(), [], 0)
+    if root_node_ids:
+        for root_node_id in root_node_ids:
+            root_node = client.get_node(root_node_id)
+            try:
+                root_browse_name = await root_node.read_browse_name()
+                root_path = [root_browse_name.Name]
+            except Exception as exc:
+                print(f"warn: failed to read root node metadata {root_node_id}: {exc}", file=sys.stderr)
+                root_path = []
+            await browse_node(root_node, root_path, 0)
+    else:
+        await browse_node(client.get_objects_node(), [], 0)
     return candidates
 
 
@@ -237,10 +349,22 @@ def print_summary(candidates: list[TagCandidate], tags: list[dict[str, str]], li
 async def run(args) -> int:
     config_path = pathlib.Path(args.config)
     config = load_config(config_path)
+    discovery_options = discovery_options_from_config(config)
     endpoint = args.endpoint or config.get("opcua", {}).get("endpoint")
     if not endpoint:
         print("error: endpoint missing; pass --endpoint or set opcua.endpoint in config", file=sys.stderr)
         return 2
+    subscription = args.subscription or discovery_options.target_subscription
+    max_depth = args.max_depth if args.max_depth is not None else discovery_options.max_depth_count
+    min_namespace = (
+        args.min_namespace
+        if args.min_namespace is not None
+        else discovery_options.min_namespace_index
+    )
+    limit = args.limit if args.limit is not None else discovery_options.max_tags_count
+    include_system = args.include_system or discovery_options.include_system
+    include_arrays = args.include_arrays or discovery_options.include_arrays
+    root_node_ids = args.root_node_id or discovery_options.root_node_ids
 
     client = Client(endpoint, timeout=args.timeout)
     if args.username:
@@ -251,35 +375,42 @@ async def run(args) -> int:
         client.set_password(password)
 
     print(f"endpoint: {endpoint}")
-    include_paths = [parse_include_path(value) for value in args.include_path]
+    include_paths = discovery_options.include_paths + [parse_include_path(value) for value in args.include_path]
+    exclude_paths = discovery_options.exclude_paths + [parse_include_path(value) for value in args.exclude_path]
     for include_path in include_paths:
         if not include_path:
             print("error: --include-path must not be empty", file=sys.stderr)
+            return 2
+    for exclude_path in exclude_paths:
+        if not exclude_path:
+            print("error: --exclude-path must not be empty", file=sys.stderr)
             return 2
     await client.connect()
     try:
         candidates = await browse_candidates(
             client,
-            min_namespace=args.min_namespace,
-            max_depth=args.max_depth,
-            include_system=args.include_system,
-            include_arrays=args.include_arrays,
+            min_namespace=min_namespace,
+            max_depth=max_depth,
+            include_system=include_system,
+            include_arrays=include_arrays,
             include_paths=include_paths,
+            exclude_paths=exclude_paths,
+            root_node_ids=root_node_ids,
         )
     finally:
         await client.disconnect()
 
     tags = build_tags(candidates)
-    if args.limit > 0:
-        tags = tags[: args.limit]
+    if limit > 0:
+        tags = tags[:limit]
 
-    print_summary(candidates, tags, args.limit)
+    print_summary(candidates, tags, limit)
 
     if args.write:
-        replace_subscription_tags(config, args.subscription, tags)
+        replace_subscription_tags(config, subscription, tags)
         write_config(config_path, config)
         print(f"updated_config: {config_path}")
-        print(f"updated_subscription: {args.subscription}")
+        print(f"updated_subscription: {subscription}")
         print(f"written_tags: {len(tags)}")
     else:
         print("dry_run: true")
@@ -290,19 +421,31 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Browse Kepware OPC UA tags and update config tags.")
     parser.add_argument("--config", default="config.local.yaml", help="YAML config to read/update")
     parser.add_argument("--endpoint", help="OPC UA endpoint; defaults to opcua.endpoint in config")
-    parser.add_argument("--subscription", default="fast", help="subscription name to replace")
+    parser.add_argument("--subscription", help="subscription name to replace; defaults to opcua.discovery.target_subscription")
     parser.add_argument("--write", action="store_true", help="write discovered tags into the config")
     parser.add_argument("--timeout", type=float, default=8.0, help="OPC UA socket timeout in seconds")
-    parser.add_argument("--max-depth", type=int, default=12, help="maximum browse recursion depth")
-    parser.add_argument("--min-namespace", type=int, default=2, help="minimum namespace index to collect")
-    parser.add_argument("--limit", type=int, default=500, help="maximum tags to write; 0 means no limit")
+    parser.add_argument("--max-depth", type=int, help="maximum browse recursion depth")
+    parser.add_argument("--min-namespace", type=int, help="minimum namespace index to collect")
+    parser.add_argument("--limit", type=int, help="maximum tags to write; 0 means no limit")
     parser.add_argument("--include-system", action="store_true", help="include _System and _Statistics branches")
     parser.add_argument("--include-arrays", action="store_true", help="include array-valued tags")
+    parser.add_argument(
+        "--root-node-id",
+        action="append",
+        default=[],
+        help="browse from this root NodeId instead of Objects; may be repeated",
+    )
     parser.add_argument(
         "--include-path",
         action="append",
         default=[],
         help="only collect tags whose browse path starts with this dot-separated branch; may be repeated",
+    )
+    parser.add_argument(
+        "--exclude-path",
+        action="append",
+        default=[],
+        help="skip tags whose browse path starts with this dot-separated branch; may be repeated",
     )
     parser.add_argument("--username", help="optional OPC UA username")
     parser.add_argument("--password", help="optional OPC UA password")

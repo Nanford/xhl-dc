@@ -19,6 +19,8 @@ fn sample(alias: &str, value: f64) -> TagSample {
     TagSample {
         node_id: format!("ns=2;s=Channel1.Device1.{alias}"),
         alias: alias.to_string(),
+        area: String::new(),
+        device: String::new(),
         value: ValueKind::Float(value),
         source_ts: ts,
         server_ts: ts,

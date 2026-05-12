@@ -150,14 +150,20 @@ async fn create_subscription(
     sender: mpsc::Sender<TagSample>,
 ) -> anyhow::Result<()> {
     let aliases = alias_map(&subscription.tags);
+    let devices = device_map(&subscription.tags);
+    let area = subscription.area.clone();
     let callback = DataChangeCallback::new(move |data_value, monitored_item| {
         let node_id = monitored_item.item_to_monitor().node_id.to_string();
         let alias = aliases
             .get(&node_id)
             .cloned()
             .unwrap_or_else(|| node_id.clone());
+        let device = devices
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_default();
 
-        match TagSample::from_data_value(node_id, alias, data_value) {
+        match TagSample::from_data_value(node_id, alias, &area, device, data_value) {
             Ok(sample) => {
                 if let Err(err) = sender.try_send(sample) {
                     metrics::counter!("dropped_samples_total").increment(1);
@@ -215,6 +221,12 @@ async fn create_subscription(
 fn alias_map(tags: &[TagConfig]) -> HashMap<String, String> {
     tags.iter()
         .map(|tag| (tag.node_id.clone(), tag.alias.clone()))
+        .collect()
+}
+
+fn device_map(tags: &[TagConfig]) -> HashMap<String, String> {
+    tags.iter()
+        .map(|tag| (tag.node_id.clone(), tag.device.clone()))
         .collect()
 }
 

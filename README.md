@@ -18,6 +18,7 @@ Rust 1.0 版本工业采集服务：从 Kepware/KEPServerEX OPC UA 订阅 tag �
 ```powershell
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS iot CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
 mysql -u root -p iot < .\migrations\202605060001_create_tag_log.sql
+mysql -u root -p iot < .\migrations\202605080001_add_source_column.sql
 ```
 
 如果你已安装 `sqlx-cli`，也可以执行：

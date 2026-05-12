@@ -51,6 +51,10 @@ impl ValueKind {
 pub struct TagSample {
     pub node_id: String,
     pub alias: String,
+    #[serde(default)]
+    pub area: String,
+    #[serde(default)]
+    pub device: String,
     pub value: ValueKind,
     pub source_ts: ChronoDateTime<Utc>,
     pub server_ts: ChronoDateTime<Utc>,
@@ -67,6 +71,8 @@ impl TagSample {
     pub fn from_data_value(
         node_id: impl Into<String>,
         alias: impl Into<String>,
+        area: impl Into<String>,
+        device: impl Into<String>,
         data_value: DataValue,
     ) -> Result<Self, TypeError> {
         let node_id = node_id.into();
@@ -89,6 +95,8 @@ impl TagSample {
         Ok(Self {
             node_id,
             alias,
+            area: area.into(),
+            device: device.into(),
             value,
             source_ts,
             server_ts,
@@ -100,6 +108,8 @@ impl TagSample {
     pub fn new(
         node_id: impl Into<String>,
         alias: impl Into<String>,
+        area: impl Into<String>,
+        device: impl Into<String>,
         value: ValueKind,
         source_ts: ChronoDateTime<Utc>,
         server_ts: ChronoDateTime<Utc>,
@@ -109,6 +119,8 @@ impl TagSample {
         Self {
             node_id: node_id.into(),
             alias: alias.into(),
+            area: area.into(),
+            device: device.into(),
             value,
             source_ts,
             server_ts,

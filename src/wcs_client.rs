@@ -56,7 +56,7 @@ async fn poll_loop(
         endpoints = config.endpoints.len(),
         "WCS poller started"
     );
-    metrics::gauge!("wcs_connected").set(1.0);
+    metrics::gauge!("wcs_connected").set(0.0);
 
     loop {
         tokio::select! {
@@ -96,6 +96,18 @@ async fn poll_endpoint(
     endpoint: &WcsEndpointConfig,
     sender: &mpsc::Sender<TagSample>,
 ) -> anyhow::Result<()> {
+    let result = poll_endpoint_inner(client, base_url, headers, endpoint, sender).await;
+    metrics::gauge!("wcs_connected").set(if result.is_ok() { 1.0 } else { 0.0 });
+    result
+}
+
+async fn poll_endpoint_inner(
+    client: &reqwest::Client,
+    base_url: &str,
+    headers: &HashMap<String, String>,
+    endpoint: &WcsEndpointConfig,
+    sender: &mpsc::Sender<TagSample>,
+) -> anyhow::Result<()> {
     let url = format!("{}{}", base_url.trim_end_matches('/'), &endpoint.path);
 
     let mut request = match endpoint.method {
@@ -123,6 +135,8 @@ async fn poll_endpoint(
                 let sample = TagSample::new(
                     node_id,
                     &tag.alias,
+                    &endpoint.area,
+                    &tag.device,
                     value,
                     now,
                     now,
@@ -134,7 +148,6 @@ async fn poll_endpoint(
                     metrics::counter!("dropped_samples_total").increment(1);
                     warn!(error = %err, alias = %tag.alias, "WCS sample dropped");
                 }
-                metrics::counter!("samples_received_total").increment(1);
             }
             Err(err) => {
                 warn!(
@@ -186,6 +199,209 @@ pub fn extract_value(
                 .as_str()
                 .with_context(|| format!("expected string at '{json_path}', got {current}"))?;
             Ok(ValueKind::Text(v.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use metrics::{
+        Counter, CounterFn, Gauge, GaugeFn, Histogram, Key, KeyName, Metadata, Recorder,
+        SharedString, Unit,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::config::WcsTagConfig;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_endpoint_does_not_increment_received_samples_metric() {
+        let recorder = TestRecorder::default();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let base_url = serve_once("200 OK", r#"{"running":true}"#).await;
+        let endpoint = test_endpoint("running", WcsValueType::Bool);
+        let client = reqwest::Client::new();
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        poll_endpoint(&client, &base_url, &HashMap::new(), &endpoint, &sender)
+            .await
+            .unwrap();
+
+        let sample = receiver.try_recv().unwrap();
+        assert_eq!(sample.alias, "running");
+        assert_eq!(recorder.counter_value("samples_received_total"), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn poll_endpoint_marks_wcs_disconnected_after_http_failure() {
+        let recorder = TestRecorder::default();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let base_url = serve_once("500 Internal Server Error", r#"{"error":"down"}"#).await;
+        let endpoint = test_endpoint("running", WcsValueType::Bool);
+        let client = reqwest::Client::new();
+        let (sender, _receiver) = mpsc::channel(1);
+
+        let result = poll_endpoint(&client, &base_url, &HashMap::new(), &endpoint, &sender).await;
+
+        assert!(result.is_err());
+        assert_eq!(recorder.gauge_value("wcs_connected"), Some(0.0));
+    }
+
+    async fn serve_once(status: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn test_endpoint(json_path: &str, value_type: WcsValueType) -> WcsEndpointConfig {
+        WcsEndpointConfig {
+            path: "/status".to_string(),
+            area: String::new(),
+            method: WcsHttpMethod::GET,
+            tags: vec![WcsTagConfig {
+                json_path: json_path.to_string(),
+                alias: json_path.to_string(),
+                device: String::new(),
+                value_type,
+            }],
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestRecorder {
+        counters: Arc<Mutex<HashMap<String, Arc<TestCounter>>>>,
+        gauges: Arc<Mutex<HashMap<String, Arc<TestGauge>>>>,
+    }
+
+    impl TestRecorder {
+        fn counter_value(&self, name: &str) -> u64 {
+            self.counters
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|counter| counter.value())
+                .unwrap_or(0)
+        }
+
+        fn gauge_value(&self, name: &str) -> Option<f64> {
+            self.gauges
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|gauge| gauge.value())
+        }
+    }
+
+    impl Recorder for TestRecorder {
+        fn describe_counter(
+            &self,
+            _key: KeyName,
+            _unit: Option<Unit>,
+            _description: SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _key: KeyName,
+            _unit: Option<Unit>,
+            _description: SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _key: KeyName,
+            _unit: Option<Unit>,
+            _description: SharedString,
+        ) {
+        }
+
+        fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
+            let counter = self
+                .counters
+                .lock()
+                .unwrap()
+                .entry(key.name().to_string())
+                .or_default()
+                .clone();
+            Counter::from_arc(counter)
+        }
+
+        fn register_gauge(&self, key: &Key, _metadata: &Metadata<'_>) -> Gauge {
+            let gauge = self
+                .gauges
+                .lock()
+                .unwrap()
+                .entry(key.name().to_string())
+                .or_default()
+                .clone();
+            Gauge::from_arc(gauge)
+        }
+
+        fn register_histogram(&self, _key: &Key, _metadata: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
+    }
+
+    #[derive(Default)]
+    struct TestCounter {
+        value: Mutex<u64>,
+    }
+
+    impl TestCounter {
+        fn value(&self) -> u64 {
+            *self.value.lock().unwrap()
+        }
+    }
+
+    impl CounterFn for TestCounter {
+        fn increment(&self, value: u64) {
+            *self.value.lock().unwrap() += value;
+        }
+
+        fn absolute(&self, value: u64) {
+            let mut current = self.value.lock().unwrap();
+            *current = (*current).max(value);
+        }
+    }
+
+    #[derive(Default)]
+    struct TestGauge {
+        value: Mutex<f64>,
+    }
+
+    impl TestGauge {
+        fn value(&self) -> f64 {
+            *self.value.lock().unwrap()
+        }
+    }
+
+    impl GaugeFn for TestGauge {
+        fn increment(&self, value: f64) {
+            *self.value.lock().unwrap() += value;
+        }
+
+        fn decrement(&self, value: f64) {
+            *self.value.lock().unwrap() -= value;
+        }
+
+        fn set(&self, value: f64) {
+            *self.value.lock().unwrap() = value;
         }
     }
 }
