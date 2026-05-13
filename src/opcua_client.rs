@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::mem;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,7 +128,14 @@ async fn connect_and_subscribe(
         .context("failed to load OPC UA description map")?;
 
     for subscription in subscriptions {
-        create_subscription(&session, subscription, sender.clone(), &external_descriptions).await?;
+        create_subscription(
+            &session,
+            subscription,
+            sender.clone(),
+            &external_descriptions,
+            opcua_config.monitored_item_create_batch_size_count,
+        )
+        .await?;
     }
 
     tokio::select! {
@@ -153,6 +161,7 @@ async fn create_subscription(
     subscription: &SubscriptionConfig,
     sender: mpsc::Sender<TagSample>,
     external_descriptions: &HashMap<String, String>,
+    monitored_item_batch_size: usize,
 ) -> anyhow::Result<()> {
     let aliases = alias_map(&subscription.tags);
     let devices = device_map(&subscription.tags);
@@ -214,33 +223,56 @@ async fn create_subscription(
         .await
         .with_context(|| format!("failed to create subscription {}", subscription.name))?;
 
-    let items = subscription
-        .tags
-        .iter()
-        .map(|tag| {
-            let node_id = NodeId::from_str(&tag.node_id)?;
-            Ok(MonitoredItemCreateRequest::from(node_id))
-        })
-        .collect::<Result<Vec<_>, opcua::types::StatusCode>>()?;
-
-    let created = session
-        .create_monitored_items(subscription_id, TimestampsToReturn::Both, items)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create monitored items for subscription {}",
-                subscription.name
-            )
-        })?;
+    let item_batches =
+        build_monitored_item_request_batches(&subscription.tags, monitored_item_batch_size)
+            .with_context(|| {
+                format!(
+                    "failed to build monitored item requests for subscription {}",
+                    subscription.name
+                )
+            })?;
+    let mut created_count = 0usize;
+    for (batch_index, items) in item_batches.into_iter().enumerate() {
+        let created = session
+            .create_monitored_items(subscription_id, TimestampsToReturn::Both, items)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create monitored item batch {} for subscription {}",
+                    batch_index + 1,
+                    subscription.name
+                )
+            })?;
+        created_count += created.len();
+    }
 
     info!(
         subscription = %subscription.name,
         subscription_id,
-        monitored_items = created.len(),
+        monitored_items = created_count,
         "OPC UA subscription created"
     );
 
     Ok(())
+}
+
+fn build_monitored_item_request_batches(
+    tags: &[TagConfig],
+    batch_size: usize,
+) -> Result<Vec<Vec<MonitoredItemCreateRequest>>, opcua::types::StatusCode> {
+    let mut batches = Vec::new();
+    let mut current = Vec::with_capacity(batch_size);
+    for tag in tags {
+        let node_id = NodeId::from_str(&tag.node_id)?;
+        current.push(MonitoredItemCreateRequest::from(node_id));
+        if current.len() >= batch_size {
+            batches.push(mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    Ok(batches)
 }
 
 fn alias_map(tags: &[TagConfig]) -> HashMap<String, String> {
@@ -643,5 +675,26 @@ mod tests {
             descriptions.get("ns=2;s=PathOnly.Tag"),
             Some(&"Path-only external description".to_string())
         );
+    }
+
+    #[test]
+    fn builds_monitored_item_request_batches_for_large_alarm_subscriptions() {
+        let tags = (0..8803)
+            .map(|index| TagConfig {
+                node_id: format!("ns=2;s=WH_CP_Zone01.Convey.Alarm.Tag{index}"),
+                alias: format!("WH_CP_Zone01.Convey.Alarm.Tag{index}"),
+                device: String::new(),
+                device_id: String::new(),
+                description: String::new(),
+            })
+            .collect::<Vec<_>>();
+
+        let batches = build_monitored_item_request_batches(&tags, 500)
+            .expect("valid NodeIds should build monitored item requests");
+        let sizes = batches.iter().map(Vec::len).collect::<Vec<_>>();
+
+        assert_eq!(batches.len(), 18);
+        assert_eq!(&sizes[..17], vec![500; 17].as_slice());
+        assert_eq!(sizes[17], 303);
     }
 }

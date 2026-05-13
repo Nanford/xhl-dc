@@ -6,5 +6,7 @@ __pycache__/
 .env
 config.local.yaml
 /deploy
+/release
 logs
 alarm_tag.sql
+*.xlsx

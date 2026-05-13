@@ -4,50 +4,77 @@ opcua:
   identity: anonymous
   session_retry_limit: -1
   application_uri: "urn:KepwareBridge"
-  # Optional. The program reads Kepware Tag._Description first; this file is only for overrides.
-  # description_map_path: "./description_map.yaml"
+  description_map_path: "./description_map.cpk.yaml"
+  monitored_item_create_batch_size_count: 500
   discovery:
-    enabled: true
-    target_subscription: "fast"
+    enabled: false
+    target_subscription: "cpk_alarm_wh_cp_zone01_001"
     root_node_ids:
-      - "ns=2;s=Channel1"
+      - "ns=2;s=WH_CP_Zone01"
+      - "ns=2;s=WH_CP_Zone02"
+      - "ns=2;s=WH_CP_Zone03"
+      - "ns=2;s=FSC1"
+      - "ns=2;s=FSC2"
+      - "ns=2;s=HCC02"
     include_paths:
-      - "Channel1.Device1"
+      - "WH_CP_Zone01"
+      - "WH_CP_Zone02"
+      - "WH_CP_Zone03"
+      - "FSC1"
+      - "FSC2"
+      - "HCC02"
     exclude_paths:
-      - "Channel1.Device1._System"
-      - "Channel1.Device1._Statistics"
+      - "WH_CP_Zone01._System"
+      - "WH_CP_Zone01._Statistics"
+      - "WH_CP_Zone02._System"
+      - "WH_CP_Zone02._Statistics"
+      - "WH_CP_Zone03._System"
+      - "WH_CP_Zone03._Statistics"
+      - "FSC1._System"
+      - "FSC1._Statistics"
+      - "FSC2._System"
+      - "FSC2._Statistics"
+      - "HCC02._System"
+      - "HCC02._Statistics"
     min_namespace_index: 2
-    max_depth_count: 6
-    max_tags_count: 500
+    max_depth_count: 8
+    max_tags_count: 20000
     include_system: false
     include_arrays: false
 
 mysql:
-  url: "mysql://user:pass@127.0.0.1:3306/iot?charset=utf8mb4"
+  url: "mysql://user:pass@127.0.0.1:3306/iot_alarm_sc?ssl-mode=DISABLED&charset=utf8mb4"
   max_connections: 8
 
 subscriptions:
-  - name: "fast"
-    area: "原料库"
+  - name: "cpk_alarm_wh_cp_zone01_001"
     publishing_interval_ms: 500
     keep_alive_count: 10
     lifetime_count: 30
     max_notifications_per_publish: 0
     priority: 0
     tags:
-      - { node_id: "ns=2;s=Channel1.Device1.Temperature", alias: "temp_1", device: "SSJ" }
-  - name: "slow"
-    area: "成品库"
-    publishing_interval_ms: 5000
-    keep_alive_count: 10
-    lifetime_count: 30
-    max_notifications_per_publish: 0
-    priority: 0
-    tags:
-      - { node_id: "ns=2;s=Channel1.Device1.Pressure", alias: "press_1", device: "FJJ" }
+      - { node_id: "ns=2;s=WH_CP_Zone01.Convey.AreaControl.Alarm.Area1_B_Fault", alias: "WH_CP_Zone01.Convey.AreaControl.Alarm.Area1_B_Fault" }
 
 sink:
-  table: "dt_alarm_log"
+  table: "ylk_alarm_log"
+  tag_prefix_routes:
+    WH_CP_Zone01:
+      table: "cpk_alarm_log"
+    WH_CP_Zone02:
+      table: "cpk_alarm_log"
+    WH_CP_Zone03:
+      table: "cpk_alarm_log"
+    FSC1:
+      table: "cpk_alarm_log"
+    FSC2:
+      table: "cpk_alarm_log"
+    HCC02:
+      table: "cpk_alarm_log"
+    FLK1:
+      table: "flk_alarm_log"
+    YLK1:
+      table: "ylk_alarm_log"
   batch_size: 500
   flush_interval_ms: 1000
 

@@ -144,6 +144,54 @@ fn parses_opcua_description_map_path() {
 }
 
 #[test]
+fn parses_opcua_monitored_item_create_batch_size_count() {
+    let yaml = valid_yaml().replace(
+        "  application_uri: \"urn:KepwareBridge\"",
+        "  application_uri: \"urn:KepwareBridge\"\n  monitored_item_create_batch_size_count: 250",
+    );
+
+    let config = AppConfig::from_yaml_str(&yaml).expect("batch size should parse");
+
+    assert_eq!(
+        config
+            .opcua
+            .as_ref()
+            .map(|opcua| opcua.monitored_item_create_batch_size_count),
+        Some(250)
+    );
+}
+
+#[test]
+fn rejects_zero_opcua_monitored_item_create_batch_size_count() {
+    let yaml = valid_yaml().replace(
+        "  application_uri: \"urn:KepwareBridge\"",
+        "  application_uri: \"urn:KepwareBridge\"\n  monitored_item_create_batch_size_count: 0",
+    );
+
+    let err = AppConfig::from_yaml_str(&yaml)
+        .expect_err("zero monitored item create batch size should be rejected");
+
+    assert!(err
+        .to_string()
+        .contains("monitored_item_create_batch_size_count"));
+}
+
+#[test]
+fn rejects_negative_opcua_monitored_item_create_batch_size_count() {
+    let yaml = valid_yaml().replace(
+        "  application_uri: \"urn:KepwareBridge\"",
+        "  application_uri: \"urn:KepwareBridge\"\n  monitored_item_create_batch_size_count: -1",
+    );
+
+    let err = AppConfig::from_yaml_str(&yaml)
+        .expect_err("negative monitored item create batch size should be rejected");
+
+    assert!(err
+        .to_string()
+        .contains("monitored_item_create_batch_size_count"));
+}
+
+#[test]
 fn rejects_enabled_discovery_with_invalid_root_node_id() {
     let yaml = valid_yaml().replace(
         "  application_uri: \"urn:KepwareBridge\"",

@@ -122,6 +122,7 @@ mysql -u root -p iot < .\migrations\202605120001_create_alarm_log_tables.sql
 
 - `opcua.endpoint`: Kepware OPC UA 地址
 - `opcua.description_map_path`: 可选描述映射文件；用于覆盖或补充 Kepware 说明
+- `opcua.monitored_item_create_batch_size_count`: 每次向 Kepware 创建 MonitoredItem 的点位数量，默认 500
 - `mysql.url`: MySQL 连接串
 - `subscriptions[].tags[].node_id`: OPC UA NodeId
 - `subscriptions[].tags[].alias`: 点位别名；建议保留完整点位路径，便于非 OPC UA 来源复用同一套解析规则
@@ -142,6 +143,33 @@ cargo build --release
 ```
 
 ## 点位发现
+
+### 从 XML 导入 CPK 报警点位
+
+成品库报警点位以 XML 清单维护时，使用导入脚本生成订阅配置和描述映射文件：
+
+```powershell
+python .\scripts\import_opcua_alarm_points.py C:\Users\nanfo\Downloads\opcua_alarm_points.xml --config .\config.local.yaml --description-map .\description_map.cpk.yaml --write
+```
+
+导入结果：
+
+- `subscriptions`: 按点位第一段前缀分组，并按每 1000 点切分订阅，例如 `cpk_alarm_wh_cp_zone01_001`
+- `subscriptions[].tags[].node_id`: 固定写成 `ns=2;s=<TagName>`
+- `subscriptions[].tags[].alias`: 保留完整 `TagName`
+- `description_map.cpk.yaml`: 记录 XML 中的中文故障描述，避免在主配置里塞入 8803 条说明
+- `sink.tag_prefix_routes`: 自动补齐 XML 中出现的前缀，并路由到 `cpk_alarm_log`
+- `opcua.discovery.enabled`: 自动置为 `false`，避免旧的在线发现边界和生成后的订阅名冲突
+
+不带 `--write` 时只做校验和统计，不修改配置：
+
+```powershell
+python .\scripts\import_opcua_alarm_points.py C:\Users\nanfo\Downloads\opcua_alarm_points.xml --config .\config.local.yaml
+```
+
+现场真实连接、账号密码、生成后的 `config.local.yaml` 和 `description_map.cpk.yaml` 作为本地运行配置保存，不提交到仓库。
+
+### 从 Kepware 在线浏览点位
 
 辅助浏览工具可以从 Kepware 输出点位清单：
 

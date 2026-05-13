@@ -48,6 +48,8 @@ pub struct OpcuaConfig {
     pub application_uri: String,
     #[serde(default)]
     pub description_map_path: Option<String>,
+    #[serde(default = "default_monitored_item_create_batch_size_count")]
+    pub monitored_item_create_batch_size_count: usize,
     #[serde(default)]
     pub discovery: Option<OpcuaDiscoveryConfig>,
 }
@@ -185,6 +187,9 @@ impl AppConfig {
             }
             if opcua.session_retry_limit < -1 {
                 return invalid("opcua.session_retry_limit must be -1 or greater");
+            }
+            if opcua.monitored_item_create_batch_size_count == 0 {
+                return invalid("opcua.monitored_item_create_batch_size_count must be greater than 0");
             }
             opcua.identity.validate()?;
             if let Some(discovery) = &opcua.discovery {
@@ -481,6 +486,10 @@ fn default_retry_limit() -> i32 {
 
 fn default_mysql_connections() -> u32 {
     8
+}
+
+fn default_monitored_item_create_batch_size_count() -> usize {
+    500
 }
 
 fn default_keep_alive_count() -> u32 {
