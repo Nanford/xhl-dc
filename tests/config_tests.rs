@@ -1,3 +1,6 @@
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use kepware_bridge::config::AppConfig;
 
 fn valid_yaml() -> &'static str {
@@ -140,6 +143,91 @@ fn parses_opcua_description_map_path() {
             .as_ref()
             .and_then(|opcua| opcua.description_map_path.as_deref()),
         Some("./tag_descriptions.yaml")
+    );
+}
+
+#[test]
+fn loads_subscriptions_from_config_relative_files() {
+    let dir = unique_temp_dir("kepware-bridge-subscription-files");
+    fs::create_dir_all(dir.join("points")).expect("temp dir should be created");
+    fs::write(
+        dir.join("points").join("subscriptions.cpk.yaml"),
+        r#"
+subscriptions:
+  - name: "cpk_alarm_wh_cp_zone01_001"
+    publishing_interval_ms: 500
+    keep_alive_count: 10
+    lifetime_count: 30
+    tags:
+      - { node_id: "ns=2;s=WH_CP_Zone01.Alarm.A", alias: "WH_CP_Zone01.Alarm.A" }
+"#,
+    )
+    .expect("subscription file should be written");
+    fs::write(
+        dir.join("points").join("subscriptions.flk.yaml"),
+        r#"
+subscriptions:
+  - name: "flk_alarm_hck_convey_001"
+    publishing_interval_ms: 500
+    keep_alive_count: 10
+    lifetime_count: 30
+    tags:
+      - { node_id: "ns=2;s=WH_FLK_Zone01.HCK_Convey.Conveyor.3001.Alarm.BFault", alias: "WH_FLK_Zone01.HCK_Convey.Conveyor.3001.Alarm.BFault" }
+"#,
+    )
+    .expect("subscription file should be written");
+    fs::write(
+        dir.join("config.yaml"),
+        r#"
+opcua:
+  endpoint: "opc.tcp://127.0.0.1:49320"
+  security_policy: None
+  identity: anonymous
+  session_retry_limit: -1
+  application_uri: "urn:KepwareBridge"
+  subscription_files:
+    - "./points/subscriptions.cpk.yaml"
+    - "./points/subscriptions.flk.yaml"
+
+mysql:
+  url: "mysql://user:pass@127.0.0.1:3306/iot"
+  max_connections: 8
+
+sink:
+  table: "ylk_alarm_log"
+  tag_prefix_routes:
+    WH_CP_Zone01:
+      table: "cpk_alarm_log"
+    WH_FLK_Zone01:
+      table: "flk_alarm_log"
+  batch_size: 500
+  flush_interval_ms: 1000
+
+buffer:
+  path: "./data/wal"
+  max_size_mb: 1024
+
+metrics:
+  bind: "127.0.0.1:9090"
+"#,
+    )
+    .expect("config file should be written");
+
+    let config = AppConfig::load(dir.join("config.yaml"))
+        .expect("config should load subscriptions from relative files");
+
+    assert_eq!(config.subscriptions.len(), 2);
+    assert_eq!(config.subscriptions[0].name, "cpk_alarm_wh_cp_zone01_001");
+    assert_eq!(config.subscriptions[1].name, "flk_alarm_hck_convey_001");
+    assert_eq!(
+        config
+            .opcua
+            .as_ref()
+            .map(|opcua| opcua.subscription_files.as_slice()),
+        Some(&[
+            "./points/subscriptions.cpk.yaml".to_string(),
+            "./points/subscriptions.flk.yaml".to_string()
+        ][..])
     );
 }
 
@@ -367,4 +455,12 @@ fn rejects_wcs_with_empty_tag_alias() {
     let err = AppConfig::from_yaml_str(&yaml).expect_err("empty alias should be rejected");
 
     assert!(err.to_string().contains("alias"));
+}
+
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after UNIX epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
 }

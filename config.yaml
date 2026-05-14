@@ -5,6 +5,7 @@ opcua:
   session_retry_limit: -1
   application_uri: "urn:KepwareBridge"
   description_map_path: "./description_map.cpk.yaml"
+  subscription_files: []
   monitored_item_create_batch_size_count: 500
   discovery:
     enabled: false
@@ -72,6 +73,8 @@ sink:
     HCC02:
       table: "cpk_alarm_log"
     FLK1:
+      table: "flk_alarm_log"
+    WH_FLK_Zone01:
       table: "flk_alarm_log"
     YLK1:
       table: "ylk_alarm_log"

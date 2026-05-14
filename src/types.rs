@@ -74,6 +74,7 @@ pub struct AlarmLogFields {
     pub device_id: String,
     pub tag: String,
     pub description: String,
+    pub remark: String,
 }
 
 fn default_source() -> String {
@@ -176,16 +177,40 @@ impl TagSample {
 
     pub fn alarm_log_fields(&self) -> AlarmLogFields {
         let parsed = parse_alarm_log_fields(self.tag_name());
+        let description = first_non_empty(self.description.as_str(), self.tag_name(), "");
         AlarmLogFields {
             location: first_non_empty(&parsed.location, self.area.as_str(), ""),
             device: first_non_empty(&parsed.device, self.device.as_str(), ""),
             device_id: first_non_empty(&parsed.device_id, self.device_id.as_str(), ""),
             tag: first_non_empty(&parsed.tag, self.alias.as_str(), self.tag_name()),
-            description: first_non_empty(self.description.as_str(), self.tag_name(), ""),
+            remark: self.alarm_log_remark(&description),
+            description,
         }
     }
 
     pub fn tag_value(&self) -> String {
+        if let Some(flag) = self.fsc_description_alarm_flag() {
+            return flag.to_string();
+        }
+
+        match self.raw_numeric_value() {
+            Some(value) if value == 0.0 => "0".to_string(),
+            Some(_) => "1".to_string(),
+            None => {
+                if self.raw_value_string().trim().is_empty() {
+                    "0".to_string()
+                } else {
+                    "1".to_string()
+                }
+            }
+        }
+    }
+
+    pub fn tag_state(&self) -> String {
+        self.raw_value_string()
+    }
+
+    fn raw_value_string(&self) -> String {
         match &self.value {
             ValueKind::Bool(value) => value.to_string(),
             ValueKind::Int(value) => value.to_string(),
@@ -194,36 +219,55 @@ impl TagSample {
         }
     }
 
-    pub fn tag_state(&self) -> &'static str {
+    fn raw_numeric_value(&self) -> Option<f64> {
+        match &self.value {
+            ValueKind::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+            ValueKind::Int(value) => Some(*value as f64),
+            ValueKind::Float(value) => Some(*value),
+            ValueKind::Text(value) => parse_text_numeric_value(value),
+        }
+    }
+
+    fn fsc_description_alarm_flag(&self) -> Option<u8> {
+        let label = self.fsc_status_label()?;
+        if is_non_alarm_status_label(label.trim()) {
+            Some(0)
+        } else {
+            Some(1)
+        }
+    }
+
+    fn alarm_log_remark(&self, description: &str) -> String {
+        if let Some(label) = self.fsc_status_label() {
+            if let Some(prefix) = description_status_prefix(description) {
+                return format!("{prefix}{}", label.trim());
+            }
+        }
+        description.to_string()
+    }
+
+    fn fsc_status_label(&self) -> Option<String> {
+        let prefix = self.tag_prefix()?;
+        if !(prefix.eq_ignore_ascii_case("FSC1") || prefix.eq_ignore_ascii_case("FSC2")) {
+            return None;
+        }
+
+        let status_code = self.status_code_string();
+        description_label_for_code(&self.description, status_code.trim())
+    }
+
+    fn status_code_string(&self) -> String {
         match &self.value {
             ValueKind::Bool(value) => {
                 if *value {
-                    "active"
+                    "1".to_string()
                 } else {
-                    "inactive"
+                    "0".to_string()
                 }
             }
-            ValueKind::Int(value) => {
-                if *value != 0 {
-                    "active"
-                } else {
-                    "inactive"
-                }
-            }
-            ValueKind::Float(value) => {
-                if *value != 0.0 {
-                    "active"
-                } else {
-                    "inactive"
-                }
-            }
-            ValueKind::Text(value) => {
-                if value.trim().is_empty() {
-                    "inactive"
-                } else {
-                    "active"
-                }
-            }
+            ValueKind::Text(value) if value.trim().eq_ignore_ascii_case("true") => "1".to_string(),
+            ValueKind::Text(value) if value.trim().eq_ignore_ascii_case("false") => "0".to_string(),
+            _ => self.raw_value_string(),
         }
     }
 }
@@ -331,6 +375,96 @@ fn first_non_empty(first: &str, second: &str, fallback: &str) -> String {
         }
     }
     String::new()
+}
+
+fn parse_text_numeric_value(value: &str) -> Option<f64> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Some(1.0);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Some(0.0);
+    }
+    trimmed.parse::<f64>().ok()
+}
+
+// FSC status descriptions encode value maps like `0、正常；1、错误；8192、运行中；`.
+fn description_status_prefix(description: &str) -> Option<&str> {
+    description
+        .split_once(['：', ':'])
+        .map(|(prefix, _)| prefix.trim())
+        .filter(|prefix| !prefix.is_empty())
+}
+
+fn description_label_for_code(description: &str, code: &str) -> Option<String> {
+    for segment in description.split(['；', ';']) {
+        let mut search_start = 0;
+        while search_start < segment.len() {
+            let Some((relative_start, _)) = segment[search_start..]
+                .char_indices()
+                .find(|(_, ch)| ch.is_ascii_digit())
+            else {
+                break;
+            };
+            let digit_start = search_start + relative_start;
+            let digit_end = digit_run_end(segment, digit_start);
+            let Some((delimiter_start, delimiter, delimiter_end)) =
+                next_non_whitespace_char(segment, digit_end)
+            else {
+                break;
+            };
+
+            if is_status_code_delimiter(delimiter) {
+                if &segment[digit_start..digit_end] == code {
+                    let label = trim_status_label(&segment[delimiter_end..]);
+                    if !label.is_empty() {
+                        return Some(label.to_string());
+                    }
+                }
+                search_start = delimiter_end;
+            } else {
+                search_start = delimiter_start + delimiter.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+fn digit_run_end(value: &str, start: usize) -> usize {
+    let mut end = start;
+    for (offset, ch) in value[start..].char_indices() {
+        if ch.is_ascii_digit() {
+            end = start + offset + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn next_non_whitespace_char(value: &str, start: usize) -> Option<(usize, char, usize)> {
+    value[start..].char_indices().find_map(|(offset, ch)| {
+        if ch.is_whitespace() {
+            None
+        } else {
+            let absolute = start + offset;
+            Some((absolute, ch, absolute + ch.len_utf8()))
+        }
+    })
+}
+
+fn is_status_code_delimiter(ch: char) -> bool {
+    matches!(ch, '、' | ':' | '：' | ',')
+}
+
+fn trim_status_label(value: &str) -> &str {
+    value.trim_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '；' | ';' | '，' | ',' | '。')
+    })
+}
+
+fn is_non_alarm_status_label(label: &str) -> bool {
+    matches!(label, "正常" | "运行中")
 }
 
 impl ValueKind {

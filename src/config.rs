@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use opcua::types::NodeId;
@@ -20,6 +20,12 @@ pub enum ConfigError {
     },
     #[error("failed to parse yaml config: {0}")]
     Parse(#[from] serde_yaml::Error),
+    #[error("failed to parse yaml config file {path}: {source}")]
+    ParseFile {
+        path: String,
+        #[source]
+        source: serde_yaml::Error,
+    },
     #[error("invalid config: {0}")]
     Invalid(String),
 }
@@ -48,6 +54,8 @@ pub struct OpcuaConfig {
     pub application_uri: String,
     #[serde(default)]
     pub description_map_path: Option<String>,
+    #[serde(default)]
+    pub subscription_files: Vec<String>,
     #[serde(default = "default_monitored_item_create_batch_size_count")]
     pub monitored_item_create_batch_size_count: usize,
     #[serde(default)]
@@ -159,13 +167,46 @@ impl AppConfig {
             path: path.display().to_string(),
             source,
         })?;
-        Self::from_yaml_str(&content)
+        let mut config = Self::parse_yaml_str(&content)?;
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        config.load_subscription_files(base_dir)?;
+        config.validate()?;
+        Ok(config)
     }
 
     pub fn from_yaml_str(content: &str) -> Result<Self, ConfigError> {
-        let config: Self = serde_yaml::from_str(content.trim_start_matches('\u{feff}'))?;
+        let config = Self::parse_yaml_str(content)?;
         config.validate()?;
         Ok(config)
+    }
+
+    fn parse_yaml_str(content: &str) -> Result<Self, ConfigError> {
+        Ok(serde_yaml::from_str(content.trim_start_matches('\u{feff}'))?)
+    }
+
+    fn load_subscription_files(&mut self, base_dir: &Path) -> Result<(), ConfigError> {
+        let Some(opcua) = &self.opcua else {
+            return Ok(());
+        };
+        for file in opcua.subscription_files.clone() {
+            if file.trim().is_empty() {
+                return invalid("opcua.subscription_files must not contain empty values");
+            }
+            let path = config_relative_path(base_dir, &file);
+            let content = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+                path: path.display().to_string(),
+                source,
+            })?;
+            let subscription_file: SubscriptionFile =
+                serde_yaml::from_str(content.trim_start_matches('\u{feff}')).map_err(|source| {
+                    ConfigError::ParseFile {
+                        path: path.display().to_string(),
+                        source,
+                    }
+                })?;
+            self.subscriptions.extend(subscription_file.into_subscriptions());
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -185,6 +226,11 @@ impl AppConfig {
                     return invalid("opcua.description_map_path must not be empty");
                 }
             }
+            for path in &opcua.subscription_files {
+                if path.trim().is_empty() {
+                    return invalid("opcua.subscription_files must not contain empty values");
+                }
+            }
             if opcua.session_retry_limit < -1 {
                 return invalid("opcua.session_retry_limit must be -1 or greater");
             }
@@ -202,6 +248,7 @@ impl AppConfig {
             for subscription in &self.subscriptions {
                 subscription.validate()?;
             }
+            validate_unique_subscription_names(&self.subscriptions)?;
             if let Some(discovery) = &opcua.discovery {
                 if discovery.enabled
                     && !self
@@ -263,6 +310,24 @@ impl AppConfig {
             .map_err(|err| ConfigError::Invalid(format!("metrics.bind is invalid: {err}")))?;
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum SubscriptionFile {
+    Wrapped {
+        subscriptions: Vec<SubscriptionConfig>,
+    },
+    List(Vec<SubscriptionConfig>),
+}
+
+impl SubscriptionFile {
+    fn into_subscriptions(self) -> Vec<SubscriptionConfig> {
+        match self {
+            SubscriptionFile::Wrapped { subscriptions } => subscriptions,
+            SubscriptionFile::List(subscriptions) => subscriptions,
+        }
     }
 }
 
@@ -478,6 +543,30 @@ impl WcsEndpointConfig {
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, ConfigError> {
     Err(ConfigError::Invalid(message.into()))
+}
+
+fn config_relative_path(base_dir: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        base_dir.join(path)
+    }
+}
+
+fn validate_unique_subscription_names(
+    subscriptions: &[SubscriptionConfig],
+) -> Result<(), ConfigError> {
+    let mut names = HashSet::new();
+    for subscription in subscriptions {
+        if !names.insert(subscription.name.as_str()) {
+            return invalid(format!(
+                "subscription name {} is duplicated",
+                subscription.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn default_retry_limit() -> i32 {

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use std::time::Duration;
 
+use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -43,16 +44,32 @@ pub fn build_insert_sql(table: &str, rows: usize) -> Result<String, SinkError> {
         return Err(SinkError::EmptyInsert);
     }
 
-    let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .take(rows)
         .collect::<Vec<_>>()
         .join(", ");
 
     Ok(format!(
         "INSERT INTO `{table}` \
-         (`location`, `device`, `device_id`, `tag`, `tag_state`, `tag_value`, `description`, `create_at`, `update_at`) \
+         (`location`, `device`, `device_id`, `tag`, `tag_state`, `tag_value`, `description`, `remark`, `create_at`, `update_at`) \
          VALUES {placeholders}"
     ))
+}
+
+pub fn alarm_log_mysql_datetime(timestamp: DateTime<Utc>) -> NaiveDateTime {
+    let beijing_offset =
+        FixedOffset::east_opt(8 * 60 * 60).expect("Beijing offset is a valid fixed offset");
+    timestamp.with_timezone(&beijing_offset).naive_local()
+}
+
+pub fn alarm_log_mysql_timestamps(
+    source_ts: DateTime<Utc>,
+    system_now: DateTime<Utc>,
+) -> (NaiveDateTime, NaiveDateTime) {
+    (
+        alarm_log_mysql_datetime(system_now),
+        alarm_log_mysql_datetime(source_ts),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,8 +186,10 @@ async fn insert_sample_refs(
 
     let sql = build_insert_sql(table, samples.len())?;
     let mut query = sqlx::query(&sql);
+    let create_time_source = Utc::now();
     for sample in samples {
         let fields = sample.alarm_log_fields();
+        let (create_at, update_at) = alarm_log_mysql_timestamps(sample.source_ts, create_time_source);
         query = query
             .bind(optional_text(&fields.location))
             .bind(optional_text(&fields.device))
@@ -179,8 +198,9 @@ async fn insert_sample_refs(
             .bind(sample.tag_state())
             .bind(sample.tag_value())
             .bind(optional_text(&fields.description))
-            .bind(sample.source_ts.naive_utc())
-            .bind(sample.source_ts.naive_utc());
+            .bind(optional_text(&fields.remark))
+            .bind(create_at)
+            .bind(update_at);
     }
 
     let result = query.execute(pool).await?;

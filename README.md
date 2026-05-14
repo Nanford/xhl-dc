@@ -49,9 +49,10 @@ WH_CP_Zone01.Convey.CSC02.Alarm.FROM_CSC02_SSJCS_Fault
 - `device`: `Conveyor`；如果没有设备分类层级，则取 `CSC02`
 - `device_id`: `M5035`；如果没有下一层设备编号，则与 `device` 相同
 - `tag`: `Alarm` 后面的最后点位名，如 `DriveFault`
-- `tag_value`: 采样值字符串，如 `true`、`false`、`6`
-- `tag_state`: 非零/`true` 写 `active`，零/`false` 写 `inactive`
+- `tag_state`: 原始采样值字符串，如 `true`、`false`、`6`
+- `tag_value`: 解析后的报警标志，只写 `0` 或 `1`
 - `description`: 优先写入 Kepware 标签说明；读取不到时留空，或由映射文件补充
+- `remark`: 普通点位与 `description` 一致
 
 ### FSC/Iscs 点位
 
@@ -68,9 +69,10 @@ FSC1.OutBound.Iscs.BC-1_0_0-BC5191.MTR-1_0_0-BC5191_MTR.Details.DS
 - `device`: `BF-1_1_1`、`BC-1_0_0-BC5191`
 - `device_id`: 从设备编码中提取中间编号，如 `1_1_1`、`1_0_0`
 - `tag`: 从 `Iscs` 开始保留完整后缀，如 `Iscs.BF-1_1_1.MTR-1_1_1_MTR.Details.DS`
-- `tag_value`: 采样值字符串
-- `tag_state`: 非零/`true` 写 `active`，零/`false` 写 `inactive`
+- `tag_state`: 原始采样值字符串
+- `tag_value`: 解析后的报警标志，只写 `0` 或 `1`；数字状态优先按描述中的码表判断，例如 `正常`、`运行中` 写 `0`，`错误`、`警告`、`槽满`、`离线` 写 `1`
 - `description`: 优先写入 Kepware 标签说明；读取不到时留空，或由映射文件补充
+- `remark`: 按当前原始值解析 `description` 中的码表后写入状态详情，例如 `皮带输送机BF-1.5.3扫描仪状态：512、离线；1024、错误；8192、运行中；` 在当前值为 `1024` 时写入 `皮带输送机BF-1.5.3扫描仪状态错误`
 
 ## 故障描述来源
 
@@ -108,10 +110,11 @@ opcua:
 
 ## 数据库表结构
 
-生产库已存在三张报警表。仓库中的 `migrations/202605120001_create_alarm_log_tables.sql` 提供同结构建表脚本，用于新环境初始化或本地验证。
+生产库已存在三张报警表。仓库中的 `migrations/202605120001_create_alarm_log_tables.sql` 提供基础建表脚本，`migrations/202605130001_add_alarm_log_remark.sql` 为三张报警表补充 `remark` 故障备注字段。
 
 ```powershell
 mysql -u root -p iot < .\migrations\202605120001_create_alarm_log_tables.sql
+mysql -u root -p iot < .\migrations\202605130001_add_alarm_log_remark.sql
 ```
 
 ## 运行配置
@@ -122,11 +125,33 @@ mysql -u root -p iot < .\migrations\202605120001_create_alarm_log_tables.sql
 
 - `opcua.endpoint`: Kepware OPC UA 地址
 - `opcua.description_map_path`: 可选描述映射文件；用于覆盖或补充 Kepware 说明
+- `opcua.subscription_files`: 可选订阅文件列表；点位规模较大时，将成品库、辅料库等订阅清单拆到独立 YAML 文件中维护
 - `opcua.monitored_item_create_batch_size_count`: 每次向 Kepware 创建 MonitoredItem 的点位数量，默认 500
 - `mysql.url`: MySQL 连接串
 - `subscriptions[].tags[].node_id`: OPC UA NodeId
 - `subscriptions[].tags[].alias`: 点位别名；建议保留完整点位路径，便于非 OPC UA 来源复用同一套解析规则
 - `sink.tag_prefix_routes`: 区域编码到报警表的路由表
+
+大规模点位配置建议使用外部订阅文件：
+
+```yaml
+opcua:
+  subscription_files:
+    - "./points/subscriptions.cpk.yaml"
+    - "./points/subscriptions.flk.yaml"
+```
+
+订阅文件可以使用包裹结构：
+
+```yaml
+subscriptions:
+  - name: "flk_alarm_wh_flk_zone01_001"
+    publishing_interval_ms: 500
+    keep_alive_count: 10
+    lifetime_count: 30
+    tags:
+      - { node_id: "ns=2;s=WH_FLK_Zone01.HCK_Convey.Conveyor.3001.Alarm.BFault", alias: "WH_FLK_Zone01.HCK_Convey.Conveyor.3001.Alarm.BFault" }
+```
 
 运行：
 
@@ -150,6 +175,12 @@ cargo build --release
 
 ```powershell
 python .\scripts\import_opcua_alarm_points.py C:\Users\nanfo\Downloads\opcua_alarm_points.xml --config .\config.local.yaml --description-map .\description_map.cpk.yaml --write
+```
+
+点位规模较大时，可以把订阅写到独立文件，并在主配置中只保留文件引用：
+
+```powershell
+python .\scripts\import_opcua_alarm_points.py C:\Users\nanfo\Downloads\HCK_GJK_Convey_opcua_points_updated.xml --config .\config.local.yaml --description-map .\points\description_map.yaml --subscriptions-output .\points\subscriptions.flk.yaml --subscription-file-ref ./points/subscriptions.flk.yaml --subscription-prefix flk_alarm --route-table flk_alarm_log --merge-description-map --write
 ```
 
 导入结果：
@@ -190,7 +221,7 @@ python .\scripts\opcua_browse_tags.py --config .\config.local.yaml --write
 
 ## 中文字段与字符集
 
-报警表中的 `location`、`device`、`device_id`、`tag`、`tag_state`、`tag_value` 使用 `VARCHAR`，`description` 使用 `TEXT`。这组类型可以存储中文报警描述，不需要改成 JSON 或二进制字段。
+报警表中的 `location`、`device`、`device_id`、`tag`、`tag_state`、`tag_value` 使用 `VARCHAR`，`description`、`remark` 使用 `TEXT`。这组类型可以存储中文报警描述和故障备注，不需要改成 JSON 或二进制字段。
 
 建库和建表脚本使用 `utf8mb4`：
 

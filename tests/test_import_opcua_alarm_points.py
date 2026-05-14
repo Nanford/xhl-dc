@@ -76,6 +76,66 @@ class ImportOpcuaAlarmPointsTests(unittest.TestCase):
             "电机状态：0、正常；1、错误；",
         )
 
+    def test_parses_excel_export_xml_shape(self):
+        xml_path = write_temp_xml(
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <OpcUaAlarmPoints>
+              <Metadata>
+                <GeneratedAt>2026-05-14 05:54:47</GeneratedAt>
+                <SourceType>Excel</SourceType>
+              </Metadata>
+              <Summary>
+                <SourceCount name="HCK_Convey" count="2" />
+                <SourceCount name="GJK_Convey" count="1" />
+                <TotalCount>3</TotalCount>
+              </Summary>
+              <Sources>
+                <Source name="HCK_Convey" fileName="HCK_Convey.xlsx" sheetName="HCK_Convey">
+                  <Points>
+                    <Point sourceRow="2">
+                      <TagName>WH_FLK_Zone01.HCK_Convey.Conveyor.3202.Alarm.BlFault</TagName>
+                      <Description>后超长</Description>
+                    </Point>
+                    <Point sourceRow="3">
+                      <TagName>WH_FLK_Zone01.HCK_Convey.Conveyor.3202.Alarm.BwOverlimit</TagName>
+                      <Description>后超限</Description>
+                    </Point>
+                  </Points>
+                </Source>
+                <Source name="GJK_Convey" fileName="GJK_Convey.xlsx" sheetName="GJK_Convey">
+                  <Points>
+                    <Point sourceRow="2">
+                      <TagName>WH_FLK_Zone01.GJK_Convey.Conveyor.3001.Alarm.BFault</TagName>
+                      <Description>后超长</Description>
+                    </Point>
+                  </Points>
+                </Source>
+              </Sources>
+            </OpcUaAlarmPoints>
+            """
+        )
+
+        document = import_opcua_alarm_points.load_alarm_point_document(xml_path)
+        import_opcua_alarm_points.validate_alarm_points(document)
+        subscriptions = import_opcua_alarm_points.build_subscriptions(
+            document.points,
+            max_tags_per_subscription=2,
+            subscription_prefix="flk_alarm",
+        )
+
+        self.assertEqual(document.declared_total_count, 3)
+        self.assertEqual(len(document.points), 3)
+        self.assertEqual(
+            [subscription["name"] for subscription in subscriptions],
+            [
+                "flk_alarm_wh_flk_zone01_001",
+                "flk_alarm_wh_flk_zone01_002",
+            ],
+        )
+        self.assertEqual(document.points[0].group_name, "HCK_Convey")
+        self.assertEqual(document.points[2].group_name, "GJK_Convey")
+
     def test_rejects_empty_duplicate_and_total_mismatch(self):
         xml_path = write_temp_xml(
             """
@@ -173,6 +233,48 @@ class ImportOpcuaAlarmPointsTests(unittest.TestCase):
         self.assertEqual(updated["opcua"]["description_map_path"], "./description_map.cpk.yaml")
         self.assertEqual(updated["opcua"]["monitored_item_create_batch_size_count"], 500)
         self.assertFalse(updated["opcua"]["discovery"]["enabled"])
+
+    def test_updates_config_with_external_subscription_file_reference(self):
+        config = yaml.safe_load(
+            """
+            opcua:
+              endpoint: "opc.tcp://127.0.0.1:49320"
+              subscription_files:
+                - "./points/subscriptions.cpk.yaml"
+            subscriptions:
+              - name: "manual"
+                publishing_interval_ms: 500
+                keep_alive_count: 10
+                lifetime_count: 30
+                tags:
+                  - { node_id: "ns=2;s=Manual", alias: "Manual" }
+            sink:
+              table: "ylk_alarm_log"
+              tag_prefix_routes: {}
+            """
+        )
+
+        updated = import_opcua_alarm_points.update_config(
+            config,
+            [{"name": "flk_alarm_wh_flk_zone01_001", "tags": []}],
+            {"WH_FLK_Zone01"},
+            description_map_path="./points/descriptions.yaml",
+            route_table="flk_alarm_log",
+            subscription_file_path="./points/subscriptions.flk.yaml",
+        )
+
+        self.assertEqual(
+            updated["opcua"]["subscription_files"],
+            [
+                "./points/subscriptions.cpk.yaml",
+                "./points/subscriptions.flk.yaml",
+            ],
+        )
+        self.assertEqual([item["name"] for item in updated["subscriptions"]], ["manual"])
+        self.assertEqual(
+            updated["sink"]["tag_prefix_routes"]["WH_FLK_Zone01"],
+            {"table": "flk_alarm_log"},
+        )
 
     def test_write_yaml_quotes_mysql_urls_for_serde_yaml_compatibility(self):
         temp_dir = pathlib.Path(tempfile.mkdtemp())

@@ -43,9 +43,14 @@ class AlarmPointDocument:
 
 def load_alarm_point_document(path: pathlib.Path) -> AlarmPointDocument:
     root = ET.parse(path).getroot()
-    if root.tag != "OpcUaPointList":
-        raise ValueError(f"expected OpcUaPointList root, got {root.tag!r}")
+    if root.tag == "OpcUaPointList":
+        return load_opcua_point_list(root)
+    if root.tag == "OpcUaAlarmPoints":
+        return load_opcua_alarm_points(root)
+    raise ValueError(f"expected OpcUaPointList or OpcUaAlarmPoints root, got {root.tag!r}")
 
+
+def load_opcua_point_list(root: ET.Element) -> AlarmPointDocument:
     declared_total_count = parse_optional_int(root.get("totalCount"), "totalCount")
     points: list[AlarmPoint] = []
     for group in root.findall("Group"):
@@ -57,6 +62,30 @@ def load_alarm_point_document(path: pathlib.Path) -> AlarmPointDocument:
                     description=child_text(point, "Description"),
                     group_name=group_name,
                     source_row=(point.get("sourceRow") or "").strip(),
+                )
+            )
+
+    return AlarmPointDocument(declared_total_count=declared_total_count, points=points)
+
+
+def load_opcua_alarm_points(root: ET.Element) -> AlarmPointDocument:
+    declared_total_count = parse_optional_int(
+        child_text(root.find("Summary"), "TotalCount"), "TotalCount"
+    )
+    points: list[AlarmPoint] = []
+    for source in root.findall("./Sources/Source"):
+        source_name = (source.get("name") or "").strip()
+        for point in source.findall("./Points/Point"):
+            source_row = (point.get("sourceRow") or "").strip()
+            file_name = (source.get("fileName") or "").strip()
+            if file_name and source_row:
+                source_row = f"{file_name}:{source_row}"
+            points.append(
+                AlarmPoint(
+                    tag_name=child_text(point, "TagName"),
+                    description=child_text(point, "Description"),
+                    group_name=source_name,
+                    source_row=source_row,
                 )
             )
 
@@ -174,6 +203,7 @@ def update_config(
     route_prefixes: set[str],
     description_map_path: str = DEFAULT_DESCRIPTION_MAP_PATH,
     route_table: str = DEFAULT_ROUTE_TABLE,
+    subscription_file_path: str | None = None,
 ) -> dict:
     opcua = config.setdefault("opcua", {})
     opcua["description_map_path"] = description_map_path
@@ -182,8 +212,15 @@ def update_config(
         DEFAULT_MONITORED_ITEM_CREATE_BATCH_SIZE,
     )
 
-    # XML import replaces manual or discovery-generated OPC UA subscriptions.
-    config["subscriptions"] = subscriptions
+    if subscription_file_path:
+        files = opcua.setdefault("subscription_files", [])
+        if not isinstance(files, list):
+            raise ValueError("opcua.subscription_files must be a list")
+        if subscription_file_path not in files:
+            files.append(subscription_file_path)
+    else:
+        # Inline XML import replaces manual or discovery-generated OPC UA subscriptions.
+        config["subscriptions"] = subscriptions
 
     discovery = opcua.get("discovery")
     if isinstance(discovery, dict):
@@ -213,6 +250,34 @@ def write_yaml(path: pathlib.Path, data: dict) -> None:
         default_flow_style=False,
     )
     path.write_text(content, encoding="utf-8", newline="\n")
+
+
+def load_description_map(path: pathlib.Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    data = load_yaml(path)
+    return {str(key): str(value) for key, value in data.items()}
+
+
+def merge_description_maps(
+    existing: dict[str, str],
+    additions: dict[str, str],
+    overwrite: bool = False,
+) -> dict[str, str]:
+    conflicts = [
+        key
+        for key, value in additions.items()
+        if key in existing and existing[key] != value
+    ]
+    if conflicts and not overwrite:
+        sample_key = sorted(conflicts)[0]
+        raise ValueError(
+            f"description conflict for {sample_key}; use --overwrite-descriptions to replace it"
+        )
+
+    merged = dict(existing)
+    merged.update(additions)
+    return dict(sorted(merged.items()))
 
 
 def print_summary(document: AlarmPointDocument, subscriptions: list[dict], description_map_path: pathlib.Path) -> None:
@@ -246,6 +311,26 @@ def parse_args():
     )
     parser.add_argument("--subscription-prefix", default=DEFAULT_SUBSCRIPTION_PREFIX)
     parser.add_argument("--route-table", default=DEFAULT_ROUTE_TABLE)
+    parser.add_argument(
+        "--subscriptions-output",
+        default=None,
+        help="write subscriptions to a separate YAML file and reference it from opcua.subscription_files",
+    )
+    parser.add_argument(
+        "--subscription-file-ref",
+        default=None,
+        help="subscription file path stored in config; defaults to --subscriptions-output",
+    )
+    parser.add_argument(
+        "--merge-description-map",
+        action="store_true",
+        help="merge generated descriptions into an existing description map instead of replacing it",
+    )
+    parser.add_argument(
+        "--overwrite-descriptions",
+        action="store_true",
+        help="replace conflicting existing description-map values when merging",
+    )
     parser.add_argument("--write", action="store_true", help="write config and description map")
     return parser.parse_args()
 
@@ -254,6 +339,10 @@ def run(args) -> int:
     xml_path = pathlib.Path(args.xml)
     config_path = pathlib.Path(args.config)
     description_map_path = pathlib.Path(args.description_map)
+    subscriptions_output_path = (
+        pathlib.Path(args.subscriptions_output) if args.subscriptions_output else None
+    )
+    subscription_file_ref = args.subscription_file_ref or args.subscriptions_output
 
     document = load_alarm_point_document(xml_path)
     validate_alarm_points(document)
@@ -279,10 +368,21 @@ def run(args) -> int:
         route_prefixes,
         description_map_path=args.description_map,
         route_table=args.route_table,
+        subscription_file_path=subscription_file_ref,
     )
     write_yaml(config_path, updated_config)
+    if subscriptions_output_path is not None:
+        write_yaml(subscriptions_output_path, {"subscriptions": subscriptions})
+    if args.merge_description_map:
+        description_map = merge_description_maps(
+            load_description_map(description_map_path),
+            description_map,
+            overwrite=args.overwrite_descriptions,
+        )
     write_yaml(description_map_path, description_map)
     print(f"updated_config: {config_path}")
+    if subscriptions_output_path is not None:
+        print(f"written_subscriptions: {subscriptions_output_path}")
     print(f"written_description_map: {description_map_path}")
     return 0
 
