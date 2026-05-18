@@ -73,7 +73,11 @@ def load_opcua_alarm_points(root: ET.Element) -> AlarmPointDocument:
         child_text(root.find("Summary"), "TotalCount"), "TotalCount"
     )
     points: list[AlarmPoint] = []
-    for source in root.findall("./Sources/Source"):
+    sources = root.findall("./Sources/Source")
+    if not sources:
+        # Some generated point-list exports place Source directly below the root.
+        sources = root.findall("./Source")
+    for source in sources:
         source_name = (source.get("name") or "").strip()
         for point in source.findall("./Points/Point"):
             source_row = (point.get("sourceRow") or "").strip()
@@ -108,7 +112,10 @@ def child_text(parent: ET.Element, name: str) -> str:
     return child.text.strip()
 
 
-def validate_alarm_points(document: AlarmPointDocument) -> None:
+def validate_alarm_points(
+    document: AlarmPointDocument,
+    allow_empty_descriptions: bool = False,
+) -> None:
     if (
         document.declared_total_count is not None
         and document.declared_total_count != len(document.points)
@@ -120,7 +127,7 @@ def validate_alarm_points(document: AlarmPointDocument) -> None:
     for index, point in enumerate(document.points, start=1):
         if not point.tag_name:
             raise ValueError(f"empty TagName at point {index}")
-        if not point.description:
+        if not point.description and not allow_empty_descriptions:
             raise ValueError(f"empty Description for {point.tag_name}")
 
     seen: set[str] = set()
@@ -148,6 +155,7 @@ def build_description_map(
     return {
         node_id_for_tag_name(point.tag_name, namespace_index): point.description
         for point in sorted(points, key=lambda item: item.tag_name)
+        if point.description
     }
 
 
@@ -331,6 +339,11 @@ def parse_args():
         action="store_true",
         help="replace conflicting existing description-map values when merging",
     )
+    parser.add_argument(
+        "--allow-empty-descriptions",
+        action="store_true",
+        help="allow points without Description and omit them from the description map",
+    )
     parser.add_argument("--write", action="store_true", help="write config and description map")
     return parser.parse_args()
 
@@ -345,7 +358,10 @@ def run(args) -> int:
     subscription_file_ref = args.subscription_file_ref or args.subscriptions_output
 
     document = load_alarm_point_document(xml_path)
-    validate_alarm_points(document)
+    validate_alarm_points(
+        document,
+        allow_empty_descriptions=args.allow_empty_descriptions,
+    )
     subscriptions = build_subscriptions(
         document.points,
         max_tags_per_subscription=args.max_tags_per_subscription,
