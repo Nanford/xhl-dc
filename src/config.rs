@@ -181,7 +181,9 @@ impl AppConfig {
     }
 
     fn parse_yaml_str(content: &str) -> Result<Self, ConfigError> {
-        Ok(serde_yaml::from_str(content.trim_start_matches('\u{feff}'))?)
+        Ok(serde_yaml::from_str(
+            content.trim_start_matches('\u{feff}'),
+        )?)
     }
 
     fn load_subscription_files(&mut self, base_dir: &Path) -> Result<(), ConfigError> {
@@ -204,7 +206,8 @@ impl AppConfig {
                         source,
                     }
                 })?;
-            self.subscriptions.extend(subscription_file.into_subscriptions());
+            self.subscriptions
+                .extend(subscription_file.into_subscriptions());
         }
         Ok(())
     }
@@ -235,7 +238,9 @@ impl AppConfig {
                 return invalid("opcua.session_retry_limit must be -1 or greater");
             }
             if opcua.monitored_item_create_batch_size_count == 0 {
-                return invalid("opcua.monitored_item_create_batch_size_count must be greater than 0");
+                return invalid(
+                    "opcua.monitored_item_create_batch_size_count must be greater than 0",
+                );
             }
             opcua.identity.validate()?;
             if let Some(discovery) = &opcua.discovery {
@@ -453,16 +458,11 @@ pub struct WcsEndpointConfig {
     pub tags: Vec<WcsTagConfig>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WcsHttpMethod {
+    #[default]
     GET,
     POST,
-}
-
-impl Default for WcsHttpMethod {
-    fn default() -> Self {
-        WcsHttpMethod::GET
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -479,19 +479,14 @@ pub struct WcsTagConfig {
     pub value_type: WcsValueType,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WcsValueType {
+    #[default]
     Bool,
     Int,
     Float,
     Text,
-}
-
-impl Default for WcsValueType {
-    fn default() -> Self {
-        WcsValueType::Bool
-    }
 }
 
 impl WcsConfig {

@@ -3,12 +3,12 @@ use std::io::{BufWriter, Write as IoWrite};
 use std::sync::Arc;
 use std::time::Duration;
 
-use opcua::client::{ClientBuilder, IdentityToken, Session, SessionEventLoop};
 use opcua::client::transport::TcpConnector;
+use opcua::client::{ClientBuilder, IdentityToken, Session, SessionEventLoop};
 use opcua::types::{
     AttributeId, BrowseDescription, BrowseDirection, BrowseResultMask, DataValue,
-    MessageSecurityMode, NodeClass, NodeClassMask, NodeId,
-    ReadValueId, ReferenceTypeId, TimestampsToReturn, Variant,
+    MessageSecurityMode, NodeClass, NodeClassMask, NodeId, ReadValueId, ReferenceTypeId,
+    TimestampsToReturn, Variant,
 };
 
 struct TagInfo {
@@ -19,8 +19,16 @@ struct TagInfo {
 }
 
 const ALARM_KEYWORDS: &[&str] = &[
-    "alarm", "fault", "error", "estop", "warning",
-    "status", "ds", "gs", "totalfault", "drivefault",
+    "alarm",
+    "fault",
+    "error",
+    "estop",
+    "warning",
+    "status",
+    "ds",
+    "gs",
+    "totalfault",
+    "drivefault",
 ];
 
 impl TagInfo {
@@ -81,7 +89,10 @@ async fn run(endpoint: &str, max_depth: usize) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no endpoint with SecurityMode=None found"))?
         .clone();
 
-    println!("Using: {} (mode={:?})", target_ep.endpoint_url, target_ep.security_mode);
+    println!(
+        "Using: {} (mode={:?})",
+        target_ep.endpoint_url, target_ep.security_mode
+    );
 
     let (session, event_loop): (Arc<Session>, SessionEventLoop<TcpConnector>) = client
         .connect_to_matching_endpoint(target_ep, IdentityToken::Anonymous)
@@ -102,7 +113,16 @@ async fn run(endpoint: &str, max_depth: usize) -> anyhow::Result<()> {
 
     let mut tags: Vec<TagInfo> = Vec::new();
     let objects_node = NodeId::objects_folder_id();
-    browse_recursive(&session, &objects_node, String::new(), 0, max_depth, &mut tags, &mut full_writer).await?;
+    browse_recursive(
+        &session,
+        &objects_node,
+        String::new(),
+        0,
+        max_depth,
+        &mut tags,
+        &mut full_writer,
+    )
+    .await?;
     full_writer.flush()?;
 
     let alarm_file = File::create("browse_alarm.txt")
@@ -145,7 +165,10 @@ async fn run(endpoint: &str, max_depth: usize) -> anyhow::Result<()> {
     println!();
     println!("Files written:");
     println!("  browse_output.txt  - all {} tags (full dump)", tags.len());
-    println!("  browse_alarm.txt   - {} alarm/fault/status tags only", alarm_tags.len());
+    println!(
+        "  browse_alarm.txt   - {} alarm/fault/status tags only",
+        alarm_tags.len()
+    );
     println!();
 
     let mut top_dirs = std::collections::HashMap::new();
@@ -244,7 +267,7 @@ fn browse_recursive<'a>(
                     value: val_str,
                 });
 
-                if tags.len() % 1000 == 0 {
+                if tags.len().is_multiple_of(1000) {
                     eprint!("\r[INFO] scanned {} tags...", tags.len());
                 }
             } else if is_object {
@@ -253,7 +276,16 @@ fn browse_recursive<'a>(
                     continue;
                 }
                 let _ = writeln!(writer, "{}[DIR]  {}", "  ".repeat(depth), child_path);
-                browse_recursive(session, &child_id, child_path, depth + 1, max_depth, tags, writer).await?;
+                browse_recursive(
+                    session,
+                    &child_id,
+                    child_path,
+                    depth + 1,
+                    max_depth,
+                    tags,
+                    writer,
+                )
+                .await?;
             }
         }
 
@@ -263,7 +295,10 @@ fn browse_recursive<'a>(
 
 async fn read_current_value(session: &Session, node_id: &NodeId) -> String {
     let read_id = ReadValueId::from(node_id.clone());
-    match session.read(&[read_id], TimestampsToReturn::Neither, 0.0).await {
+    match session
+        .read(&[read_id], TimestampsToReturn::Neither, 0.0)
+        .await
+    {
         Ok(values) => format_data_value(values.first()),
         Err(_) => "<read error>".to_string(),
     }
@@ -275,7 +310,10 @@ async fn read_data_type_name(session: &Session, node_id: &NodeId) -> String {
         attribute_id: AttributeId::Value as u32,
         ..Default::default()
     };
-    match session.read(&[read_id], TimestampsToReturn::Neither, 0.0).await {
+    match session
+        .read(&[read_id], TimestampsToReturn::Neither, 0.0)
+        .await
+    {
         Ok(values) => {
             if let Some(dv) = values.first() {
                 variant_type_name(&dv.value)

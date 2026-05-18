@@ -5,13 +5,14 @@ use std::time::Duration;
 use anyhow::Context;
 use kepware_bridge::buffer::SampleBuffer;
 use kepware_bridge::config::AppConfig;
+use kepware_bridge::metadata::TagMetadataCache;
 use kepware_bridge::metrics::install_prometheus;
 use kepware_bridge::opcua_client::run_opcua_client;
-use kepware_bridge::sink::{connect_mysql, SinkTableRouter, SinkWorker};
+use kepware_bridge::sink::{connect_mysql, SinkTableRouter, SinkWorker, SinkWorkerSettings};
 use kepware_bridge::wcs_client::run_wcs_client;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -27,6 +28,16 @@ async fn main() -> anyhow::Result<()> {
     let mysql_pool = connect_mysql(&config.mysql)
         .await
         .context("failed to connect MySQL")?;
+    let metadata_cache = match TagMetadataCache::load(&mysql_pool).await {
+        Ok(cache) => cache,
+        Err(err) => {
+            warn!(
+                error = %err,
+                "tag metadata cache unavailable; alarm history fault_type will be empty"
+            );
+            TagMetadataCache::default()
+        }
+    };
     let buffer = SampleBuffer::open(&config.buffer.path, config.buffer.max_size_mb)
         .context("failed to open sled buffer")?;
 
@@ -41,8 +52,11 @@ async fn main() -> anyhow::Result<()> {
         sample_rx,
         shutdown_rx.clone(),
         buffer,
-        config.sink.batch_size,
-        Duration::from_millis(config.sink.flush_interval_ms),
+        metadata_cache,
+        SinkWorkerSettings {
+            batch_size: config.sink.batch_size,
+            flush_interval: Duration::from_millis(config.sink.flush_interval_ms),
+        },
     );
     let sink_handle = tokio::spawn(sink_worker.run());
 
@@ -101,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,opcua=warn"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,opcua=warn"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 

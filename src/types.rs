@@ -103,9 +103,9 @@ impl TagSample {
             .map(opcua_datetime_to_chrono)
             .unwrap_or(now);
         let quality = data_value.status.unwrap_or(StatusCode::Good).bits();
-        let variant = data_value
-            .value
-            .ok_or_else(|| TypeError::MissingValue { node_id: node_id.clone() })?;
+        let variant = data_value.value.ok_or_else(|| TypeError::MissingValue {
+            node_id: node_id.clone(),
+        })?;
         let value = ValueKind::try_from_variant(&node_id, variant)?;
 
         Ok(Self {
@@ -123,6 +123,7 @@ impl TagSample {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         node_id: impl Into<String>,
         alias: impl Into<String>,
@@ -194,7 +195,7 @@ impl TagSample {
         }
 
         match self.raw_numeric_value() {
-            Some(value) if value == 0.0 => "0".to_string(),
+            Some(0.0) => "0".to_string(),
             Some(_) => "1".to_string(),
             None => {
                 if self.raw_value_string().trim().is_empty() {
@@ -458,9 +459,8 @@ fn is_status_code_delimiter(ch: char) -> bool {
 }
 
 fn trim_status_label(value: &str) -> &str {
-    value.trim_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, '；' | ';' | '，' | ',' | '。')
-    })
+    value
+        .trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '；' | ';' | '，' | ',' | '。'))
 }
 
 fn is_non_alarm_status_label(label: &str) -> bool {

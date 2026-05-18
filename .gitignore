@@ -10,3 +10,6 @@ config.local.yaml
 logs
 alarm_tag.sql
 *.xlsx
+description_map*.yaml
+/points/
+/outputs/

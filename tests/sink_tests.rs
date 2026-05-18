@@ -78,9 +78,13 @@ fn builds_multi_row_insert_sql() {
 
     assert!(sql.starts_with("INSERT INTO `cpk_alarm_log`"));
     assert!(sql.contains(
-        "(`location`, `device`, `device_id`, `tag`, `tag_state`, `tag_value`, `description`, `remark`, `create_at`, `update_at`)"
+        "(`location`, `device`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `description`, `remark`, `create_at`, `update_at`)"
     ));
-    assert_eq!(sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").count(), 2);
+    assert_eq!(
+        sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -259,8 +263,20 @@ fn renders_alarm_log_remark_from_fsc_description_code_map() {
         "皮带输送机BF-3.1.7PPI状态：0、正常；1、错误；2、警告；",
     );
 
-    assert_eq!(normal.alarm_log_fields().remark, "皮带输送机BF-1.1.1电机状态正常");
-    assert_eq!(error.alarm_log_fields().remark, "滚筒汇流机LRJ-3.12.1电机状态错误");
-    assert_eq!(running.alarm_log_fields().remark, "皮带输送机BF-1.5.3扫描仪状态运行中");
-    assert_eq!(warning.alarm_log_fields().remark, "皮带输送机BF-3.1.7PPI状态警告");
+    assert_eq!(
+        normal.alarm_log_fields().remark,
+        "皮带输送机BF-1.1.1电机状态正常"
+    );
+    assert_eq!(
+        error.alarm_log_fields().remark,
+        "滚筒汇流机LRJ-3.12.1电机状态错误"
+    );
+    assert_eq!(
+        running.alarm_log_fields().remark,
+        "皮带输送机BF-1.5.3扫描仪状态运行中"
+    );
+    assert_eq!(
+        warning.alarm_log_fields().remark,
+        "皮带输送机BF-3.1.7PPI状态警告"
+    );
 }

@@ -34,6 +34,10 @@ pub fn install_prometheus(bind: &str) -> anyhow::Result<()> {
         "buffer_replayed_samples_total",
         "Buffered samples replayed into MySQL"
     );
+    describe_counter!(
+        "metadata_unmapped_samples_total",
+        "Samples inserted without a matching tag metadata record"
+    );
     describe_gauge!(
         "opcua_connected",
         "OPC UA connection state, 1 for connected and 0 for disconnected"
@@ -42,11 +46,7 @@ pub fn install_prometheus(bind: &str) -> anyhow::Result<()> {
         "wcs_connected",
         "WCS poller state, 1 for polling and 0 for disconnected"
     );
-    describe_counter!(
-        "wcs_poll_errors_total",
-        "WCS HTTP poll errors"
-    );
+    describe_counter!("wcs_poll_errors_total", "WCS HTTP poll errors");
 
     Ok(())
 }
-

@@ -245,3 +245,36 @@ mysql:
 - `buffer.path` 必须放在持久化磁盘目录。
 - 生产环境建议使用 `Basic256Sha256 + Sign and Encrypt + 用户名密码`。
 - 日志输出到 stdout/stderr，metrics 默认绑定 `127.0.0.1:9090`。
+## 数据库 V2：月度结存与统计
+
+故障历史仍写入在线热表：`cpk_alarm_log`、`flk_alarm_log`、`ylk_alarm_log`。在线热表保留当月数据，上月及更早数据按月归档到独立结存表，例如 `cpk_alarm_log_202605`、`flk_alarm_log_202605`、`ylk_alarm_log_202605`。
+
+月度归档由数据库存储过程执行：
+
+```sql
+CALL sp_archive_alarm_month('202605');
+```
+
+归档过程会先创建月度结存表，再复制指定月份数据，确认目标表行数不低于源表后，按 5000 行一批从热表删除旧数据。每次执行结果写入 `alarm_archive_runs`，包含归档月份、源表、目标表、复制行数、删除行数、状态和错误信息。
+
+基础统计保留三张独立物理表：
+
+- `daily_area_fault_stats`：区域故障统计表
+- `daily_device_type_fault_stats`：设备类型统计表
+- `daily_fault_type_stats`：故障类型统计表
+
+统计刷新由存储过程执行：
+
+```sql
+CALL sp_refresh_daily_fault_stats('2026-05-15');
+```
+
+MySQL Event 会每天刷新昨日统计；每月 1 日先刷新昨日统计，再归档上月历史数据。现场数据库需要开启 Event Scheduler：
+
+```sql
+SET GLOBAL event_scheduler = ON;
+```
+
+历史查询由程序根据时间范围选择物理表：当月查询访问热表，历史月份查询访问对应月表，跨月查询使用 `UNION ALL` 合并结果。查询条件必须包含时间范围，并优先带上库区、设备编号或故障类型条件，避免跨大量月表全量扫描。
+
+标签基础信息保存在 `tag_catalog`，故障类型保存在 `fault_type_catalog`。程序启动时加载标签基础缓存，写入历史表时补充 `fault_type`；未匹配标签仍然照常入库，`fault_type` 留空，并通过 `metadata_unmapped_samples_total` 指标暴露待维护数量。

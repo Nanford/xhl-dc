@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::buffer::{BufferedSample, SampleBuffer};
 use crate::config::{MysqlConfig, SinkConfig};
+use crate::metadata::TagMetadataCache;
 use crate::types::TagSample;
 
 #[derive(Debug, Error)]
@@ -44,14 +45,13 @@ pub fn build_insert_sql(table: &str, rows: usize) -> Result<String, SinkError> {
         return Err(SinkError::EmptyInsert);
     }
 
-    let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .take(rows)
+    let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         .collect::<Vec<_>>()
         .join(", ");
 
     Ok(format!(
         "INSERT INTO `{table}` \
-         (`location`, `device`, `device_id`, `tag`, `tag_state`, `tag_value`, `description`, `remark`, `create_at`, `update_at`) \
+         (`location`, `device`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `description`, `remark`, `create_at`, `update_at`) \
          VALUES {placeholders}"
     ))
 }
@@ -100,7 +100,10 @@ impl SinkTableRouter {
         Self::new(config.table.clone(), routes)
     }
 
-    pub fn from_routes<I, K, T>(default_table: impl Into<String>, routes: I) -> Result<Self, SinkError>
+    pub fn from_routes<I, K, T>(
+        default_table: impl Into<String>,
+        routes: I,
+    ) -> Result<Self, SinkError>
     where
         I: IntoIterator<Item = (K, T)>,
         K: Into<String>,
@@ -169,8 +172,9 @@ pub async fn insert_samples(
     }
 
     let mut inserted = 0;
+    let metadata = TagMetadataCache::default();
     for (table, group) in group_samples_by_table(router, samples) {
-        inserted += insert_sample_refs(pool, &table, &group).await?;
+        inserted += insert_sample_refs(pool, &table, &group, &metadata).await?;
     }
     Ok(inserted)
 }
@@ -179,6 +183,7 @@ async fn insert_sample_refs(
     pool: &MySqlPool,
     table: &str,
     samples: &[&TagSample],
+    metadata_cache: &TagMetadataCache,
 ) -> Result<u64, SinkError> {
     if samples.is_empty() {
         return Ok(0);
@@ -189,12 +194,20 @@ async fn insert_sample_refs(
     let create_time_source = Utc::now();
     for sample in samples {
         let fields = sample.alarm_log_fields();
-        let (create_at, update_at) = alarm_log_mysql_timestamps(sample.source_ts, create_time_source);
+        let metadata = metadata_cache.lookup(sample, &fields);
+        if metadata.is_none() && !metadata_cache.is_empty() {
+            metrics::counter!("metadata_unmapped_samples_total").increment(1);
+        }
+        let (create_at, update_at) =
+            alarm_log_mysql_timestamps(sample.source_ts, create_time_source);
         query = query
             .bind(optional_text(&fields.location))
             .bind(optional_text(&fields.device))
             .bind(optional_text(&fields.device_id))
+            .bind(optional_text(&sample.node_id))
+            .bind(optional_text(&sample.alias))
             .bind(fields.tag)
+            .bind(metadata.and_then(|metadata| metadata.fault_type.as_deref()))
             .bind(sample.tag_state())
             .bind(sample.tag_value())
             .bind(optional_text(&fields.description))
@@ -285,8 +298,14 @@ pub struct SinkWorker {
     receiver: mpsc::Receiver<TagSample>,
     shutdown: watch::Receiver<bool>,
     buffer: SampleBuffer,
+    metadata_cache: TagMetadataCache,
     batch_size: usize,
     flush_interval: Duration,
+}
+
+pub struct SinkWorkerSettings {
+    pub batch_size: usize,
+    pub flush_interval: Duration,
 }
 
 impl SinkWorker {
@@ -296,8 +315,8 @@ impl SinkWorker {
         receiver: mpsc::Receiver<TagSample>,
         shutdown: watch::Receiver<bool>,
         buffer: SampleBuffer,
-        batch_size: usize,
-        flush_interval: Duration,
+        metadata_cache: TagMetadataCache,
+        settings: SinkWorkerSettings,
     ) -> Self {
         Self {
             pool,
@@ -305,8 +324,9 @@ impl SinkWorker {
             receiver,
             shutdown,
             buffer,
-            batch_size,
-            flush_interval,
+            metadata_cache,
+            batch_size: settings.batch_size,
+            flush_interval: settings.flush_interval,
         }
     }
 
@@ -314,6 +334,7 @@ impl SinkWorker {
         info!(
             default_table = %self.router.default_table(),
             route_count = self.router.route_count(),
+            metadata_entries = self.metadata_cache.len(),
             batch_size = self.batch_size,
             flush_interval_ms = self.flush_interval.as_millis(),
             "sink worker started"
@@ -370,7 +391,7 @@ impl SinkWorker {
         }
 
         for (table, group) in group_samples_by_table(&self.router, samples) {
-            match insert_sample_refs(&self.pool, &table, &group).await {
+            match insert_sample_refs(&self.pool, &table, &group, &self.metadata_cache).await {
                 Ok(rows) => {
                     metrics::counter!("mysql_inserted_samples_total").increment(rows);
                     info!(rows, table = %table, "batch inserted into mysql");
@@ -382,7 +403,10 @@ impl SinkWorker {
                         rows = group.len(),
                         "batch insert failed, buffering samples"
                     );
-                    let failed = group.iter().map(|sample| (*sample).clone()).collect::<Vec<_>>();
+                    let failed = group
+                        .iter()
+                        .map(|sample| (*sample).clone())
+                        .collect::<Vec<_>>();
                     self.buffer.push_many(&failed)?;
                     self.buffer.flush()?;
                     metrics::counter!("buffered_samples_total").increment(failed.len() as u64);
@@ -400,7 +424,7 @@ impl SinkWorker {
 
         for (table, group) in group_buffered_by_table(&self.router, &entries) {
             let samples = group.iter().map(|entry| &entry.sample).collect::<Vec<_>>();
-            match insert_sample_refs(&self.pool, &table, &samples).await {
+            match insert_sample_refs(&self.pool, &table, &samples, &self.metadata_cache).await {
                 Ok(rows) => {
                     let acked = group
                         .iter()
