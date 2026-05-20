@@ -4,11 +4,13 @@
 
 ## 当前写库目标
 
-报警数据写入三张结构一致的表，按点位第一个字段路由：
+报警数据先写入三张结构一致的历史热表，按点位第一个字段路由：
 
 - `cpk_alarm_log`
 - `flk_alarm_log`
 - `ylk_alarm_log`
+
+服务启动后会把已加载的 `subscriptions[].tags` 预置到 `device_realtime_status`。采样批量写入历史热表成功后，同一批点位会同步 upsert 到 `device_realtime_status`，看板和快速查询直接读取该实时状态表；历史追溯仍以三张历史热表为准。
 
 `config.yaml` 中的 `sink.table` 是兜底表，`sink.tag_prefix_routes` 是区域编码到目标表的对照表。现场新增区域编码时，只需要改配置，不需要重新编译。
 

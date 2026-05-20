@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
     let sink_router =
         SinkTableRouter::from_config(&config.sink).context("failed to build sink table router")?;
+    let sink_subscriptions = config.subscriptions.clone();
     let sink_worker = SinkWorker::new(
         mysql_pool,
         sink_router,
@@ -56,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         SinkWorkerSettings {
             batch_size: config.sink.batch_size,
             flush_interval: Duration::from_millis(config.sink.flush_interval_ms),
+            subscriptions: sink_subscriptions,
         },
     );
     let sink_handle = tokio::spawn(sink_worker.run());

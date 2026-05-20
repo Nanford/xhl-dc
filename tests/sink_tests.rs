@@ -1,6 +1,9 @@
 use chrono::{NaiveDate, TimeZone, Utc};
+use kepware_bridge::config::{SubscriptionConfig, TagConfig};
+use kepware_bridge::metadata::TagMetadataCache;
 use kepware_bridge::sink::{
     alarm_log_mysql_datetime, alarm_log_mysql_timestamps, build_insert_sql,
+    build_realtime_seed_sql, build_realtime_upsert_sql, realtime_tag_seed_for_subscription,
     validate_mysql_identifier, BatchBuilder, SinkTableRouter,
 };
 use kepware_bridge::types::{TagSample, ValueKind};
@@ -85,6 +88,76 @@ fn builds_multi_row_insert_sql() {
             .count(),
         2
     );
+}
+
+#[test]
+fn builds_realtime_seed_sql_for_subscription_tags() {
+    let sql = build_realtime_seed_sql(2).expect("sql should build");
+
+    assert!(sql.starts_with("INSERT INTO `device_realtime_status`"));
+    assert!(sql.contains(
+        "(`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `description`)"
+    ));
+    assert_eq!(sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").count(), 2);
+    assert!(sql.contains("ON DUPLICATE KEY UPDATE"));
+    assert!(!sql.contains("`tag_value`"));
+}
+
+#[test]
+fn builds_realtime_upsert_sql_with_timestamp_guard() {
+    let sql = build_realtime_upsert_sql(2).expect("sql should build");
+
+    assert!(sql.starts_with("INSERT INTO `device_realtime_status`"));
+    assert!(sql.contains(
+        "(`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `description`, `status_description`, `last_fault_at`)"
+    ));
+    assert_eq!(
+        sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .count(),
+        2
+    );
+    assert!(sql.contains("VALUES(`last_fault_at`) >= `last_fault_at`"));
+}
+
+#[test]
+fn builds_realtime_seed_from_subscription_tag_metadata() {
+    let router = SinkTableRouter::from_routes("ylk_alarm_log", [("WH_CP_Zone01", "cpk_alarm_log")])
+        .expect("routes should be valid");
+    let subscription = SubscriptionConfig {
+        name: "cpk_alarm_wh_cp_zone01_001".to_string(),
+        area: String::new(),
+        publishing_interval_ms: 1000,
+        keep_alive_count: 10,
+        lifetime_count: 30,
+        max_notifications_per_publish: 0,
+        priority: 0,
+        tags: vec![],
+    };
+    let tag = TagConfig {
+        node_id: "ns=2;s=WH_CP_Zone01.Convey.Conveyor.M5035.Alarm.DriveFault".to_string(),
+        alias: "WH_CP_Zone01.Convey.Conveyor.M5035.Alarm.DriveFault".to_string(),
+        device: String::new(),
+        device_id: String::new(),
+        description: "M5035驱动故障".to_string(),
+    };
+    let metadata = TagMetadataCache::from_rows([(
+        Some("ns=2;s=WH_CP_Zone01.Convey.Conveyor.M5035.Alarm.DriveFault".to_string()),
+        None,
+        "DriveFault".to_string(),
+        Some("驱动故障".to_string()),
+    )]);
+
+    let seed = realtime_tag_seed_for_subscription(&router, &subscription, &tag, &metadata);
+
+    assert_eq!(seed.source_table, "cpk_alarm_log");
+    assert_eq!(seed.location, "WH_CP_Zone01");
+    assert_eq!(seed.device_type, "Conveyor");
+    assert_eq!(seed.device_id, "M5035");
+    assert_eq!(seed.node_id, tag.node_id);
+    assert_eq!(seed.alias, tag.alias);
+    assert_eq!(seed.tag, "DriveFault");
+    assert_eq!(seed.fault_type.as_deref(), Some("驱动故障"));
+    assert_eq!(seed.description, "M5035驱动故障");
 }
 
 #[test]

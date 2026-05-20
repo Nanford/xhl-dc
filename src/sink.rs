@@ -9,9 +9,11 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::buffer::{BufferedSample, SampleBuffer};
-use crate::config::{MysqlConfig, SinkConfig};
+use crate::config::{MysqlConfig, SinkConfig, SubscriptionConfig, TagConfig};
 use crate::metadata::TagMetadataCache;
-use crate::types::TagSample;
+use crate::types::{TagSample, ValueKind};
+
+const REALTIME_WRITE_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Error)]
 pub enum SinkError {
@@ -56,6 +58,62 @@ pub fn build_insert_sql(table: &str, rows: usize) -> Result<String, SinkError> {
     ))
 }
 
+pub fn build_realtime_seed_sql(rows: usize) -> Result<String, SinkError> {
+    if rows == 0 {
+        return Err(SinkError::EmptyInsert);
+    }
+
+    let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Ok(format!(
+        "INSERT INTO `device_realtime_status` \
+         (`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `description`) \
+         VALUES {placeholders} \
+         ON DUPLICATE KEY UPDATE \
+         `source_system` = VALUES(`source_system`), \
+         `location` = VALUES(`location`), \
+         `device_type` = VALUES(`device_type`), \
+         `device_id` = VALUES(`device_id`), \
+         `alias` = VALUES(`alias`), \
+         `tag` = VALUES(`tag`), \
+         `fault_type` = VALUES(`fault_type`), \
+         `description` = VALUES(`description`)"
+    ))
+}
+
+pub fn build_realtime_upsert_sql(rows: usize) -> Result<String, SinkError> {
+    if rows == 0 {
+        return Err(SinkError::EmptyInsert);
+    }
+
+    let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let accepts_newer = "`last_fault_at` IS NULL OR VALUES(`last_fault_at`) >= `last_fault_at`";
+
+    Ok(format!(
+        "INSERT INTO `device_realtime_status` \
+         (`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `description`, `status_description`, `last_fault_at`) \
+         VALUES {placeholders} \
+         ON DUPLICATE KEY UPDATE \
+         `source_system` = IF({accepts_newer}, VALUES(`source_system`), `source_system`), \
+         `location` = IF({accepts_newer}, VALUES(`location`), `location`), \
+         `device_type` = IF({accepts_newer}, VALUES(`device_type`), `device_type`), \
+         `device_id` = IF({accepts_newer}, VALUES(`device_id`), `device_id`), \
+         `alias` = IF({accepts_newer}, VALUES(`alias`), `alias`), \
+         `tag` = IF({accepts_newer}, VALUES(`tag`), `tag`), \
+         `fault_type` = IF({accepts_newer}, VALUES(`fault_type`), `fault_type`), \
+         `tag_state` = IF({accepts_newer}, VALUES(`tag_state`), `tag_state`), \
+         `tag_value` = IF({accepts_newer}, VALUES(`tag_value`), `tag_value`), \
+         `description` = IF({accepts_newer}, VALUES(`description`), `description`), \
+         `status_description` = IF({accepts_newer}, VALUES(`status_description`), `status_description`), \
+         `last_fault_at` = IF({accepts_newer}, VALUES(`last_fault_at`), `last_fault_at`), \
+         `updated_at` = IF({accepts_newer}, CURRENT_TIMESTAMP(3), `updated_at`)"
+    ))
+}
+
 pub fn alarm_log_mysql_datetime(timestamp: DateTime<Utc>) -> NaiveDateTime {
     let beijing_offset =
         FixedOffset::east_opt(8 * 60 * 60).expect("Beijing offset is a valid fixed offset");
@@ -70,6 +128,70 @@ pub fn alarm_log_mysql_timestamps(
         alarm_log_mysql_datetime(system_now),
         alarm_log_mysql_datetime(source_ts),
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeTagSeed {
+    pub source_table: String,
+    pub location: String,
+    pub device_type: String,
+    pub device_id: String,
+    pub node_id: String,
+    pub alias: String,
+    pub tag: String,
+    pub fault_type: Option<String>,
+    pub description: String,
+}
+
+pub fn realtime_tag_seed_for_subscription(
+    router: &SinkTableRouter,
+    subscription: &SubscriptionConfig,
+    tag: &TagConfig,
+    metadata_cache: &TagMetadataCache,
+) -> RealtimeTagSeed {
+    let now = Utc::now();
+    let sample = TagSample::new(
+        tag.node_id.clone(),
+        tag.alias.clone(),
+        subscription.area.clone(),
+        tag.device.clone(),
+        tag.device_id.clone(),
+        tag.description.clone(),
+        ValueKind::Int(0),
+        now,
+        now,
+        0,
+        "opcua",
+    );
+    let fields = sample.alarm_log_fields();
+    let metadata = metadata_cache.lookup(&sample, &fields);
+
+    RealtimeTagSeed {
+        source_table: router.table_for_sample(&sample).to_string(),
+        location: fields.location,
+        device_type: fields.device,
+        device_id: fields.device_id,
+        node_id: tag.node_id.clone(),
+        alias: tag.alias.clone(),
+        tag: fields.tag,
+        fault_type: metadata.and_then(|metadata| metadata.fault_type.clone()),
+        description: fields.description,
+    }
+}
+
+fn realtime_tag_seeds_for_subscriptions(
+    router: &SinkTableRouter,
+    subscriptions: &[SubscriptionConfig],
+    metadata_cache: &TagMetadataCache,
+) -> Vec<RealtimeTagSeed> {
+    subscriptions
+        .iter()
+        .flat_map(|subscription| {
+            subscription.tags.iter().map(move |tag| {
+                realtime_tag_seed_for_subscription(router, subscription, tag, metadata_cache)
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +307,25 @@ async fn insert_sample_refs(
     samples: &[&TagSample],
     metadata_cache: &TagMetadataCache,
 ) -> Result<u64, SinkError> {
+    let rows = insert_history_sample_refs(pool, table, samples, metadata_cache).await?;
+    if let Err(err) = upsert_realtime_sample_refs(pool, table, samples, metadata_cache).await {
+        warn!(
+            error = %err,
+            table = %table,
+            rows = samples.len(),
+            "history insert succeeded but realtime status update failed"
+        );
+        metrics::counter!("realtime_upsert_failed_total").increment(samples.len() as u64);
+    }
+    Ok(rows)
+}
+
+async fn insert_history_sample_refs(
+    pool: &MySqlPool,
+    table: &str,
+    samples: &[&TagSample],
+    metadata_cache: &TagMetadataCache,
+) -> Result<u64, SinkError> {
     if samples.is_empty() {
         return Ok(0);
     }
@@ -220,6 +361,71 @@ async fn insert_sample_refs(
     Ok(result.rows_affected())
 }
 
+async fn seed_realtime_tag_refs(
+    pool: &MySqlPool,
+    seeds: &[RealtimeTagSeed],
+) -> Result<u64, SinkError> {
+    let mut affected = 0;
+    for chunk in seeds.chunks(REALTIME_WRITE_BATCH_SIZE) {
+        let sql = build_realtime_seed_sql(chunk.len())?;
+        let mut query = sqlx::query(&sql);
+        for seed in chunk {
+            query = query
+                .bind("opcua")
+                .bind(seed.source_table.as_str())
+                .bind(optional_text(&seed.location))
+                .bind(optional_text(&seed.device_type))
+                .bind(optional_text(&seed.device_id))
+                .bind(optional_text(&seed.node_id))
+                .bind(optional_text(&seed.alias))
+                .bind(seed.tag.as_str())
+                .bind(seed.fault_type.as_deref())
+                .bind(optional_text(&seed.description));
+        }
+        affected += query.execute(pool).await?.rows_affected();
+    }
+    Ok(affected)
+}
+
+async fn upsert_realtime_sample_refs(
+    pool: &MySqlPool,
+    table: &str,
+    samples: &[&TagSample],
+    metadata_cache: &TagMetadataCache,
+) -> Result<u64, SinkError> {
+    if samples.is_empty() {
+        return Ok(0);
+    }
+
+    let mut affected = 0;
+    for chunk in samples.chunks(REALTIME_WRITE_BATCH_SIZE) {
+        let sql = build_realtime_upsert_sql(chunk.len())?;
+        let mut query = sqlx::query(&sql);
+        for sample in chunk {
+            let fields = sample.alarm_log_fields();
+            let metadata = metadata_cache.lookup(sample, &fields);
+            let last_fault_at = alarm_log_mysql_datetime(sample.source_ts);
+            query = query
+                .bind(source_system(&sample.source))
+                .bind(table)
+                .bind(optional_text(&fields.location))
+                .bind(optional_text(&fields.device))
+                .bind(optional_text(&fields.device_id))
+                .bind(optional_text(&sample.node_id))
+                .bind(optional_text(&sample.alias))
+                .bind(fields.tag)
+                .bind(metadata.and_then(|metadata| metadata.fault_type.as_deref()))
+                .bind(sample.tag_state())
+                .bind(sample.tag_value())
+                .bind(optional_text(&fields.description))
+                .bind(optional_text(&fields.remark))
+                .bind(last_fault_at);
+        }
+        affected += query.execute(pool).await?.rows_affected();
+    }
+    Ok(affected)
+}
+
 fn group_samples_by_table<'a>(
     router: &'a SinkTableRouter,
     samples: &'a [TagSample],
@@ -253,6 +459,15 @@ fn optional_text(value: &str) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+fn source_system(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "opcua"
+    } else {
+        trimmed
     }
 }
 
@@ -299,6 +514,7 @@ pub struct SinkWorker {
     shutdown: watch::Receiver<bool>,
     buffer: SampleBuffer,
     metadata_cache: TagMetadataCache,
+    realtime_tag_seeds: Vec<RealtimeTagSeed>,
     batch_size: usize,
     flush_interval: Duration,
 }
@@ -306,6 +522,7 @@ pub struct SinkWorker {
 pub struct SinkWorkerSettings {
     pub batch_size: usize,
     pub flush_interval: Duration,
+    pub subscriptions: Vec<SubscriptionConfig>,
 }
 
 impl SinkWorker {
@@ -318,6 +535,8 @@ impl SinkWorker {
         metadata_cache: TagMetadataCache,
         settings: SinkWorkerSettings,
     ) -> Self {
+        let realtime_tag_seeds =
+            realtime_tag_seeds_for_subscriptions(&router, &settings.subscriptions, &metadata_cache);
         Self {
             pool,
             router,
@@ -325,6 +544,7 @@ impl SinkWorker {
             shutdown,
             buffer,
             metadata_cache,
+            realtime_tag_seeds,
             batch_size: settings.batch_size,
             flush_interval: settings.flush_interval,
         }
@@ -335,6 +555,7 @@ impl SinkWorker {
             default_table = %self.router.default_table(),
             route_count = self.router.route_count(),
             metadata_entries = self.metadata_cache.len(),
+            realtime_seed_tags = self.realtime_tag_seeds.len(),
             batch_size = self.batch_size,
             flush_interval_ms = self.flush_interval.as_millis(),
             "sink worker started"
@@ -342,6 +563,7 @@ impl SinkWorker {
 
         let mut batcher = BatchBuilder::new(self.batch_size);
         let mut interval = tokio::time::interval(self.flush_interval);
+        self.seed_realtime_status().await;
         self.replay_buffered().await?;
 
         loop {
@@ -414,6 +636,32 @@ impl SinkWorker {
             }
         }
         Ok(())
+    }
+
+    async fn seed_realtime_status(&self) {
+        if self.realtime_tag_seeds.is_empty() {
+            return;
+        }
+
+        match seed_realtime_tag_refs(&self.pool, &self.realtime_tag_seeds).await {
+            Ok(rows) => {
+                metrics::counter!("realtime_seeded_tags_total").increment(rows);
+                info!(
+                    rows,
+                    tags = self.realtime_tag_seeds.len(),
+                    "realtime status table seeded from subscriptions"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    tags = self.realtime_tag_seeds.len(),
+                    "failed to seed realtime status table from subscriptions"
+                );
+                metrics::counter!("realtime_seed_failed_total")
+                    .increment(self.realtime_tag_seeds.len() as u64);
+            }
+        }
     }
 
     async fn replay_buffered(&self) -> Result<(), SinkError> {
