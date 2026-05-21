@@ -109,14 +109,26 @@ fn builds_realtime_upsert_sql_with_timestamp_guard() {
 
     assert!(sql.starts_with("INSERT INTO `device_realtime_status`"));
     assert!(sql.contains(
-        "(`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `description`, `status_description`, `last_fault_at`)"
+        "(`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `fault_count`, `description`, `status_description`, `last_fault_at`)"
     ));
     assert_eq!(
-        sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        sql.matches("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .count(),
         2
     );
     assert!(sql.contains("VALUES(`last_fault_at`) >= `last_fault_at`"));
+    assert!(sql.contains(
+        "`fault_count` = IF(`last_fault_at` IS NULL OR VALUES(`last_fault_at`) >= `last_fault_at`"
+    ));
+    assert!(sql.contains("COALESCE(NULLIF(TRIM(`tag_value`), ''), '0') = '0'"));
+    assert!(sql.contains("COALESCE(NULLIF(TRIM(VALUES(`tag_value`)), ''), '0') <> '0'"));
+    assert!(
+        sql.find("`fault_count` = IF")
+            .expect("fault_count update should exist")
+            < sql
+                .find("`tag_value` = IF")
+                .expect("tag_value update should exist")
+    );
 }
 
 #[test]

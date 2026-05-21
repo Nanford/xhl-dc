@@ -88,14 +88,16 @@ pub fn build_realtime_upsert_sql(rows: usize) -> Result<String, SinkError> {
         return Err(SinkError::EmptyInsert);
     }
 
-    let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         .collect::<Vec<_>>()
         .join(", ");
     let accepts_newer = "`last_fault_at` IS NULL OR VALUES(`last_fault_at`) >= `last_fault_at`";
+    let was_not_fault = "COALESCE(NULLIF(TRIM(`tag_value`), ''), '0') = '0'";
+    let is_fault = "COALESCE(NULLIF(TRIM(VALUES(`tag_value`)), ''), '0') <> '0'";
 
     Ok(format!(
         "INSERT INTO `device_realtime_status` \
-         (`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `description`, `status_description`, `last_fault_at`) \
+         (`source_system`, `source_table`, `location`, `device_type`, `device_id`, `node_id`, `alias`, `tag`, `fault_type`, `tag_state`, `tag_value`, `fault_count`, `description`, `status_description`, `last_fault_at`) \
          VALUES {placeholders} \
          ON DUPLICATE KEY UPDATE \
          `source_system` = IF({accepts_newer}, VALUES(`source_system`), `source_system`), \
@@ -106,6 +108,7 @@ pub fn build_realtime_upsert_sql(rows: usize) -> Result<String, SinkError> {
          `tag` = IF({accepts_newer}, VALUES(`tag`), `tag`), \
          `fault_type` = IF({accepts_newer}, VALUES(`fault_type`), `fault_type`), \
          `tag_state` = IF({accepts_newer}, VALUES(`tag_state`), `tag_state`), \
+         `fault_count` = IF({accepts_newer} AND {was_not_fault} AND {is_fault}, `fault_count` + 1, `fault_count`), \
          `tag_value` = IF({accepts_newer}, VALUES(`tag_value`), `tag_value`), \
          `description` = IF({accepts_newer}, VALUES(`description`), `description`), \
          `status_description` = IF({accepts_newer}, VALUES(`status_description`), `status_description`), \
@@ -404,6 +407,8 @@ async fn upsert_realtime_sample_refs(
         for sample in chunk {
             let fields = sample.alarm_log_fields();
             let metadata = metadata_cache.lookup(sample, &fields);
+            let tag_value = sample.tag_value();
+            let fault_count = realtime_initial_fault_count(&tag_value);
             let last_fault_at = alarm_log_mysql_datetime(sample.source_ts);
             query = query
                 .bind(source_system(&sample.source))
@@ -416,7 +421,8 @@ async fn upsert_realtime_sample_refs(
                 .bind(fields.tag)
                 .bind(metadata.and_then(|metadata| metadata.fault_type.as_deref()))
                 .bind(sample.tag_state())
-                .bind(sample.tag_value())
+                .bind(tag_value)
+                .bind(fault_count)
                 .bind(optional_text(&fields.description))
                 .bind(optional_text(&fields.remark))
                 .bind(last_fault_at);
@@ -468,6 +474,14 @@ fn source_system(value: &str) -> &str {
         "opcua"
     } else {
         trimmed
+    }
+}
+
+fn realtime_initial_fault_count(tag_value: &str) -> u64 {
+    if tag_value.trim().is_empty() || tag_value.trim() == "0" {
+        0
+    } else {
+        1
     }
 }
 

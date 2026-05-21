@@ -277,6 +277,42 @@ MySQL Event 会每天刷新昨日统计；每月 1 日先刷新昨日统计，�
 SET GLOBAL event_scheduler = ON;
 ```
 
+统计表没有数据时，先执行只读排查脚本确认当前库、事件状态、历史热表最近数据、实时表和统计表行数：
+
+```powershell
+mysql --default-character-set=utf8mb4 -u <user> -p <database> < .\sql\diagnose_alarm_stats.sql
+```
+
+三张 `daily_*_fault_stats` 表只汇总历史热表中 `tag_value <> '0'` 的故障行；如果 `cpk_alarm_log`、`flk_alarm_log`、`ylk_alarm_log` 最近没有新行，统计刷新即使正常执行也不会生成统计结果。
+
 历史查询由程序根据时间范围选择物理表：当月查询访问热表，历史月份查询访问对应月表，跨月查询使用 `UNION ALL` 合并结果。查询条件必须包含时间范围，并优先带上库区、设备编号或故障类型条件，避免跨大量月表全量扫描。
 
 标签基础信息保存在 `tag_catalog`，故障类型保存在 `fault_type_catalog`。程序启动时加载标签基础缓存，写入历史表时补充 `fault_type`；未匹配标签仍然照常入库，`fault_type` 留空，并通过 `metadata_unmapped_samples_total` 指标暴露待维护数量。
+
+## 字段编码字典
+
+`field_value_catalog` 保存通用字段编码和中文含义，首批维护 `location` 和 `device_type` 两类维度。历史热表和实时表继续保存原始编码，展示层通过字典表转换中文名称，避免重写历史数据。
+
+初始字典由迁移 `migrations/202605210001_add_field_value_catalog.sql` 写入，包含 `FSC1`、`FSC2`、`WH_CP_Zone01`、`WH_CP_Zone02`、`WH_CP_Zone03`、`WH_FLK_Zone01`、`WH_YLK_Zone01` 等库区编码，以及 `AreaControl`、`ControlBox`、`Conveyor`、`CSC01`、`CSC02`、`DM_CD`、`DM_MD`、`SRM`、`TapePunch`、`GROSSING1` 到 `GROSSING13`、`gjk_conveyor`、`hck_conveyor`、`ClampingMachine`、`Hoister`、`Crane`、`RGV` 等设备类型编码。
+
+字段字典的唯一键是 `field_name + field_code`。查询时必须同时带上字段名和编码匹配，不能只按 `field_code` 关联：
+
+```sql
+LEFT JOIN `field_value_catalog` loc
+  ON loc.`field_name` = 'location'
+ AND loc.`field_code` = h.`location`
+ AND loc.`enabled` = 1
+LEFT JOIN `field_value_catalog` dev
+  ON dev.`field_name` = 'device_type'
+ AND dev.`field_code` = h.`device`
+ AND dev.`enabled` = 1
+```
+
+迁移同时提供四个增强视图：
+
+- `cpk_alarm_log_enriched`
+- `flk_alarm_log_enriched`
+- `ylk_alarm_log_enriched`
+- `device_realtime_status_enriched`
+
+增强视图在原始字段之外补充 `location_label` 和 `device_type_label`，看板、报表和人工查询可以直接读取这些视图。`device_id` 对应的设备名称、厂家、型号、安装位置等档案信息仍由 `device_catalog` 或 `wcs_device_catalog` 维护，不放入通用字段字典。
