@@ -1,7 +1,9 @@
 use std::fs;
 
 fn read_text(path: &str) -> String {
-    fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+    let text = fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+    // SQL snapshots are text-matched below; normalize checkout-dependent CRLFs.
+    text.replace("\r\n", "\n")
 }
 
 #[test]
